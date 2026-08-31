@@ -1,1 +1,50 @@
-<geom name="red_box" type="box" size=".2 .2 .2" rgba="1 0 0 1"/>
+<body name="quadruped" pos="0 0 0.35">
+	<freejoint name="base_free"/>
+
+	<!-- Rectangular prism torso -->
+	<geom name="torso" type="box" size="0.20 0.10 0.05" rgba="0.6 0.6 0.6 1"/>
+
+	<!-- Front-left leg -->
+	<body name="fl_hip" pos="0.16 0.09 -0.05" euler="0 45 0">
+		<joint name="fl_hip_ball" type="ball" damping="0.5"/>
+		<geom name="fl_upper" type="capsule" fromto="0 0 0 0 0 -0.16" size="0.018" rgba="0.2 0.2 0.2 1"/>
+		<body name="fl_shin" pos="0 0 -0.16" euler="0 -90 0">
+			<joint name="fl_knee" type="hinge" axis="0 1 0" range="-120 0" ref="-90" limited="true" damping="1"/>
+			<geom name="fl_lower" type="capsule" fromto="0 0 0 0 0 -0.16" size="0.016" rgba="0.3 0.3 0.3 1"/>
+			<geom name="fl_foot" type="sphere" pos="0 0 -0.17" size="0.02" rgba="0.1 0.1 0.1 1"/>
+		</body>
+	</body>
+
+	<!-- Front-right leg -->
+	<body name="fr_hip" pos="0.16 -0.09 -0.05" euler="0 45 0">
+		<joint name="fr_hip_ball" type="ball" damping="0.5"/>
+		<geom name="fr_upper" type="capsule" fromto="0 0 0 0 0 -0.16" size="0.018" rgba="0.2 0.2 0.2 1"/>
+		<body name="fr_shin" pos="0 0 -0.16" euler="0 -90 0">
+			<joint name="fr_knee" type="hinge" axis="0 1 0" range="-120 0" ref="-90" limited="true" damping="1"/>
+			<geom name="fr_lower" type="capsule" fromto="0 0 0 0 0 -0.16" size="0.016" rgba="0.3 0.3 0.3 1"/>
+			<geom name="fr_foot" type="sphere" pos="0 0 -0.17" size="0.02" rgba="0.1 0.1 0.1 1"/>
+		</body>
+	</body>
+
+	<!-- Rear-left leg -->
+	<body name="rl_hip" pos="-0.16 0.09 -0.05" euler="0 45 0">
+		<joint name="rl_hip_ball" type="ball" damping="0.5"/>
+		<geom name="rl_upper" type="capsule" fromto="0 0 0 0 0 -0.16" size="0.018" rgba="0.2 0.2 0.2 1"/>
+		<body name="rl_shin" pos="0 0 -0.16" euler="0 -90 0">
+			<joint name="rl_knee" type="hinge" axis="0 1 0" range="-120 0" ref="-90" limited="true" damping="1"/>
+			<geom name="rl_lower" type="capsule" fromto="0 0 0 0 0 -0.16" size="0.016" rgba="0.3 0.3 0.3 1"/>
+			<geom name="rl_foot" type="sphere" pos="0 0 -0.17" size="0.02" rgba="0.1 0.1 0.1 1"/>
+		</body>
+	</body>
+
+	<!-- Rear-right leg -->
+	<body name="rr_hip" pos="-0.16 -0.09 -0.05" euler="0 45 0">
+		<joint name="rr_hip_ball" type="ball" damping="0.5"/>
+		<geom name="rr_upper" type="capsule" fromto="0 0 0 0 0 -0.16" size="0.018" rgba="0.2 0.2 0.2 1"/>
+		<body name="rr_shin" pos="0 0 -0.16" euler="0 -90 0">
+			<joint name="rr_knee" type="hinge" axis="0 1 0" range="-120 0" ref="-90" limited="true" damping="1"/>
+			<geom name="rr_lower" type="capsule" fromto="0 0 0 0 0 -0.16" size="0.016" rgba="0.3 0.3 0.3 1"/>
+			<geom name="rr_foot" type="sphere" pos="0 0 -0.17" size="0.02" rgba="0.1 0.1 0.1 1"/>
+		</body>
+	</body>
+</body>

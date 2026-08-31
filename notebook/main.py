@@ -1,6 +1,8 @@
+#! uv run --script --directory ../
+
 import marimo
 
-__generated_with = "0.23.6"
+__generated_with = "0.23.9"
 app = marimo.App()
 
 
@@ -16,10 +18,11 @@ def _():
 @app.cell
 def _():
     import os
+
     from jinja2 import Environment, FileSystemLoader
 
     # 1. Tell Jinja to look for templates in the asset folder in the root of the project
-    asset_folder = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'assets')
+    asset_folder = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets")
     file_loader = FileSystemLoader(asset_folder)
     env = Environment(loader=file_loader)
     return (env,)
@@ -42,20 +45,31 @@ def _(Image, mo, mujoco):
         watch._file_name = asset_path
         return watch
 
-    def render_world(world_xml):
-        """Renders the world in mujoco and returns the image for mo"""
-        model = mujoco.MjModel.from_xml_string(world_xml)
-        data = mujoco.MjData(model)
-
+    def render_frame(model, data, camera):
+        """Render the current MuJoCo state as a Marimo image."""
         with mujoco.Renderer(model) as renderer:
-            mujoco.mj_forward(model, data)
-            renderer.update_scene(data)
+            renderer.update_scene(data, camera=camera)
             pixels = renderer.render()
             img = Image.fromarray(pixels)
 
             return mo.image(img)
 
-    return asset_file_watcher, print_xml, render_world
+    return asset_file_watcher, print_xml, render_frame
+
+
+@app.cell
+def _(mujoco):
+    def controllable_camera():
+        camera = mujoco.MjvCamera()
+        camera.type = mujoco.mjtCamera.mjCAMERA_FREE
+        camera.lookat[:] = [0.0, 0.0, 0.2]
+        camera.distance = 1.2
+        camera.elevation = -20
+        camera.azimuth = 90
+        return camera
+
+    cam = controllable_camera()
+    return (cam,)
 
 
 @app.cell
@@ -91,8 +105,11 @@ def _(bot, env, print_xml, world_file_watcher):
 
 
 @app.cell
-def _(render_world, world):
-    render_world(world)
+def _(cam, mujoco, render_frame, world):
+    model = mujoco.MjModel.from_xml_string(world)
+    data = mujoco.MjData(model)
+    mujoco.mj_forward(model, data)
+    render_frame(model, data, cam)
     return
 
 

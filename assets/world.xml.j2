@@ -1,7 +1,18 @@
 <mujoco>
   {{ mujoco_config }}
+  <asset>
+    <texture name="sky" type="skybox" builtin="gradient"
+             rgb1="0.18 0.30 0.45" rgb2="0.62 0.78 0.92"
+             width="512" height="512"/>
+    <texture name="ground_grid" type="2d" builtin="checker"
+             rgb1="0.48 0.52 0.56" rgb2="0.72 0.76 0.80"
+             width="512" height="512"/>
+    <material name="ground_grid" texture="ground_grid" texrepeat="10 10"
+              texuniform="true" reflectance="0.15"/>
+  </asset>
   <worldbody>
     <light name="top" pos="0 0 1"/>
+    <geom name="ground" type="plane" size="5 5 0.1" material="ground_grid"/>
     {{ worldbody }}
   </worldbody>
 </mujoco>
