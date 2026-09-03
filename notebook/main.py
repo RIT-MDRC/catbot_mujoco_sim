@@ -2,7 +2,7 @@
 
 import marimo
 
-__generated_with = "0.23.9"
+__generated_with = "0.24.0"
 app = marimo.App()
 
 
@@ -110,6 +110,41 @@ def _(cam, mujoco, render_frame, world):
     data = mujoco.MjData(model)
     mujoco.mj_forward(model, data)
     render_frame(model, data, cam)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo, world):
+    import subprocess
+    import sys
+    import tempfile
+    from pathlib import Path
+
+    viewer_xml_path = Path(tempfile.gettempdir()) / "catbot_mujoco_viewer.xml"
+    viewer_state = {"process": None}
+
+    def open_viewer(_value):
+        viewer_process = viewer_state["process"]
+
+        if viewer_process is not None and viewer_process.poll() is None:
+            return viewer_process.pid
+
+        viewer_xml_path.write_text(world, encoding="utf-8")
+        viewer_state["process"] = subprocess.Popen(
+            [sys.executable, "-m", "mujoco.viewer", f"--mjcf={viewer_xml_path}"]
+        )
+        return viewer_state["process"].pid
+
+    open_viewer_button = mo.ui.button(
+        label="Open interactive MuJoCo viewer",
+        on_click=open_viewer,
+    )
+    mo.vstack(
+        [
+            mo.md("Use the viewer's **Joint** panel or press `J` to show joint axes."),
+            open_viewer_button,
+        ]
+    )
     return
 
 

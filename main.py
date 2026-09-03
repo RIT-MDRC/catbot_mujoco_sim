@@ -1,4 +1,6 @@
-"""Launch the Catbot Marimo notebook with file watching enabled."""
+"""Launch the Catbot Marimo notebook with file watching enabled.
+Run `uv run noteboook` to launch the notebook
+"""
 
 from __future__ import annotations
 
