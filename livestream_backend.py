@@ -12,11 +12,10 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 
 import mujoco
+import uvicorn
 from starlette.applications import Starlette
 from starlette.responses import HTMLResponse, JSONResponse, StreamingResponse
 from starlette.routing import Route
-import uvicorn
-
 
 FRAME_RATE = 10
 FRAME_WIDTH = 640
@@ -73,7 +72,7 @@ class LiveSimulation:
         while True:
             with self._condition:
                 self._condition.wait_for(
-                    lambda: self._stopped
+                    lambda after=after: self._stopped
                     or (self._frame is not None and self._frame.number > after)
                 )
                 if self._stopped:
@@ -104,10 +103,11 @@ class LiveSimulation:
         try:
             while True:
                 with self._condition:
+                    observed_revision = current_world_revision
                     self._condition.wait_for(
-                        lambda: self._stopped
-                        or self._world_revision != current_world_revision
-                        or (self._running and current_world_revision >= 0)
+                        lambda revision=observed_revision: self._stopped
+                        or self._world_revision != revision
+                        or (self._running and revision >= 0)
                     )
                     if self._stopped:
                         return
@@ -126,7 +126,7 @@ class LiveSimulation:
                             model, height=FRAME_HEIGHT, width=FRAME_WIDTH
                         )
                         current_world_revision = world_revision
-                    except Exception as error:  # surfaced through /health
+                    except Exception as error:  # noqa: BLE001, surfaced through /health
                         with self._condition:
                             self._last_error = str(error)
                             self._running = False

@@ -1,0 +1,9 @@
+{
+  "include": ["*.py", "notebook", "tests"],
+  "exclude": [".venv", "runs"],
+  "stubPath": "typings",
+  "venvPath": ".",
+  "venv": ".venv",
+  "typeCheckingMode": "basic",
+  "reportMissingModuleSource": "none"
+}

@@ -12,6 +12,7 @@ def _():
 
     import marimo as mo
     from jinja2 import Environment, FileSystemLoader
+
     from livestream_backend import get_backend
 
     asset_folder = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets")
@@ -71,20 +72,17 @@ def _(backend, reset, world):
     # Both a template edit and Reset replace the backend's state at time zero.
     _ = reset.value
     backend.set_world(world)
-    return
 
 
 @app.cell
 def _(backend, start_stop):
     backend.set_running(start_stop.value)
-    return
 
 
 @app.cell(hide_code=True)
 def _(backend, mo, start_stop):
     status = "Running" if start_stop.value else "Paused"
     mo.md(f"**Simulation:** {status}  \\n+**Local stream:** `{backend.url}/stream.mp4`")
-    return
 
 
 @app.cell(hide_code=True)
@@ -97,7 +95,6 @@ def _(backend, mo):
            </video>''',
         height="500px",
     )
-    return
 
 
 if __name__ == "__main__":

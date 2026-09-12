@@ -5,21 +5,27 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
+    "gymnasium>=1.2.0",
     "jinja2>=3.1.6",
     "marimo>=0.24.0",
     "mujoco>=3.9.0",
     "pillow>=12.2.0",
     "ruff>=0.15.16",
+    "stable-baselines3>=2.7.0",
     "starlette>=0.51.0",
+    "tensorboard>=2.20.0",
     "uvicorn>=0.49.0",
 ]
 
 [project.scripts]
 notebook = "main:main"
+rollout = "rollout:main"
+train = "train:main"
+ragdoll = "ragdoll:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-only-include = ["main.py"]
+only-include = ["assets", "catbot_env.py", "main.py", "ragdoll.py", "rollout.py", "train.py"]

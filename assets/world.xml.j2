@@ -1,5 +1,7 @@
-<mujoco>
+<mujoco model="catbot_quadruped">
   {{ mujoco_config }}
+  <compiler angle="degree" autolimits="true"/>
+  <option timestep="0.002" gravity="0 0 -9.81" integrator="implicitfast"/>
   <asset>
     <texture name="sky" type="skybox" builtin="gradient"
              rgb1="0.18 0.30 0.45" rgb2="0.62 0.78 0.92"
@@ -12,7 +14,29 @@
   </asset>
   <worldbody>
     <light name="top" pos="0 0 1"/>
-    <geom name="ground" type="plane" size="5 5 0.1" material="ground_grid"/>
+    <geom name="ground" type="plane" size="5 5 0.1" material="ground_grid" friction="1 0.005 0.0001"/>
+    <!-- Visual scale reference: box sizes are half-extents, giving a 1 m cube. 
+    <geom name="reference_cube" type="box" pos="0 2 0.5" size="0.5 0.5 0.5"
+          rgba="0.9 0.45 0.15 1" contype="0" conaffinity="0"/> -->
     {{ worldbody }}
   </worldbody>
+  <!-- One normalized position target is exposed for every rotational DoF. -->
+  <actuator>
+    <position name="fl_hip_x" joint="fl_hip_ball" gear="1 0 0" kp="25" ctrlrange="-0.7 0.7"/>
+    <position name="fl_hip_y" joint="fl_hip_ball" gear="0 1 0" kp="25" ctrlrange="-0.7 0.7"/>
+    <position name="fl_hip_z" joint="fl_hip_ball" gear="0 0 1" kp="15" ctrlrange="0 0"/>
+    <position name="fr_hip_x" joint="fr_hip_ball" gear="1 0 0" kp="25" ctrlrange="-0.7 0.7"/>
+    <position name="fr_hip_y" joint="fr_hip_ball" gear="0 1 0" kp="25" ctrlrange="-0.7 0.7"/>
+    <position name="fr_hip_z" joint="fr_hip_ball" gear="0 0 1" kp="15" ctrlrange="0 0"/>
+    <position name="rl_hip_x" joint="rl_hip_ball" gear="1 0 0" kp="25" ctrlrange="-0.7 0.7"/>
+    <position name="rl_hip_y" joint="rl_hip_ball" gear="0 1 0" kp="25" ctrlrange="-0.7 0.7"/>
+    <position name="rl_hip_z" joint="rl_hip_ball" gear="0 0 1" kp="15" ctrlrange="0 0"/>
+    <position name="rr_hip_x" joint="rr_hip_ball" gear="1 0 0" kp="25" ctrlrange="-0.7 0.7"/>
+    <position name="rr_hip_y" joint="rr_hip_ball" gear="0 1 0" kp="25" ctrlrange="-0.7 0.7"/>
+    <position name="rr_hip_z" joint="rr_hip_ball" gear="0 0 1" kp="15" ctrlrange="0 0"/>
+    <position name="fl_knee_actuator" joint="fl_knee" kp="25" ctrlrange="-3.14 0"/>
+    <position name="fr_knee_actuator" joint="fr_knee" kp="25" ctrlrange="-3.14 0"/>
+    <position name="rl_knee_actuator" joint="rl_knee" kp="25" ctrlrange="-3.14 0"/>
+    <position name="rr_knee_actuator" joint="rr_knee" kp="25" ctrlrange="-3.14 0"/>
+  </actuator>
 </mujoco>

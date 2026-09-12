@@ -57,6 +57,14 @@ uv run marimo edit notebook/livestream.py --watch
 
 It starts a localhost-only backend, streams the simulation as fragmented H.264 MP4, and embeds the video in a Marimo iframe. The notebook provides Start / Stop and Reset controls. This mode requires a system `ffmpeg` installation with `libx264` support.
 
+
+## Tensor Board
+
+For training log, you can use tensor board:
+```sh
+uv run tensorboard --logdir runs
+```
+
 ## Workspace layout
 
 ```text
@@ -82,6 +90,88 @@ It starts a localhost-only backend, streams the simulation as fragmented H.264 M
 4. MuJoCo parses the resulting XML, and the static notebook renders a camera view as an image.
 
 `robot.xml.j2` defines a free-floating torso, four ball-jointed hips, hinge knees, capsule limbs, and spherical feet. `world.xml.j2` supplies the top light and the `<worldbody>` where the robot is placed.
+
+## Reinforcement learning
+
+`catbot_env.py` exposes the rendered model as `CatbotEnv`, a standard Gymnasium environment. It has 16 normalized position-action slots for checkpoint compatibility: hip x/y and knee targets are active, while every hip-z target is fixed at zero because that movement is unavailable on the real robot. Its 66-value observation contains base pose and velocity, joint pose and velocity, the current `(forward, lateral, yaw)` velocity command, and the prior action.
+
+The initial task is velocity tracking. The reward combines velocity tracking, uprightness, a small alive bonus, and penalties for control magnitude and abrupt changes. Episodes terminate for a fall, inverted torso, or non-finite physics state, and truncate after 1,000 control steps by default. Reset randomizes the torso mass, ground friction, initial state, and command; pass `domain_randomization=False` for deterministic physics parameters.
+
+Run the deterministic smoke tests and a random-action rollout:
+
+```sh
+uv run python -m unittest tests/test_catbot_env.py
+```
+
+Install dependencies and train a first policy:
+
+```sh
+uv sync
+uv run train --timesteps 1000000
+```
+
+The final model is written to `runs/catbot_ppo.zip`; periodic checkpoints are written to `runs/checkpoints/` every 25,000 timesteps. The `runs/` directory is intentionally Git-ignored but remains visible in Finder and the terminal. The training environment is headless; use `CatbotEnv(render_mode="rgb_array")` for evaluation frames or `render_mode="human"` from a desktop session for an interactive MuJoCo viewer.
+
+Change the checkpoint interval, or disable intermediate saves with `--checkpoint-freq 0`:
+
+```sh
+uv run train --checkpoint-freq 50000
+```
+
+Open the native MuJoCo viewer and play one episode from the default checkpoint:
+
+```sh
+uv run rollout
+```
+
+To render a selected checkpoint, pass its path as the only argument:
+
+```sh
+uv run rollout runs/checkpoints/catbot_ppo_<run-id>_25000_steps.zip
+```
+
+The viewer runs deterministic PPO actions with fixed physics. It holds the final pose after a fall or the 1,000-step limit so it can be inspected; close the viewer to return to the terminal.
+
+### Manual limb flex test
+
+Open a native viewer with direct control over each hip and knee actuator:
+
+```sh
+uv run ragdoll
+```
+
+In the MuJoCo viewer, open the Actuator/Control panel and drag the actuator sliders. The default script leaves `data.ctrl` under the viewer's control, so slider changes are applied directly to the simulation.
+
+The manual viewer uses half-strength position servos with the existing joint damping for softer landings. Startup and reset targets match the initial joint pose to avoid kicking the knees during the drop. Tune compliance with `uv run ragdoll --stiffness-scale 0.3` (softer) or `--stiffness-scale 1` (original stiffness). This setting applies only to the manual viewer; training and policy rollout physics are unchanged. Manual targets do not actively balance the robot, so extreme poses can still tip it over.
+
+For terminal-based control instead, use:
+
+```sh
+uv run ragdoll --terminal
+```
+
+The terminal then accepts commands while the viewer is open. Select a leg and axis, then nudge or set its position target:
+
+```text
+leg fl
+axis knee
+set -1.8
+status
+```
+
+Use `axis x` or `axis y` to test the available hip actuators. Hip-z is locked at zero in both the policy model and viewer. `+` and `-` move the selected target by `0.1`; targets are clipped to their actuator ranges. `reset` restores the reference pose, and `quit` closes the command loop. The viewer's actuator/joint panels remain available for inspecting the resulting pose.
+
+To continue a finished or interrupted run, pass its checkpoint and the number of *additional* timesteps to collect. The default output path overwrites that checkpoint only after the extra training is complete.
+
+```sh
+uv run train --resume runs/catbot_ppo.zip --timesteps 1000000
+```
+
+PPO defaults to CPU because MuJoCo physics and this small MLP policy are CPU-heavy. On Apple Silicon, opt into Metal Performance Shaders after confirming availability with `uv run python -c 'import torch; print(torch.backends.mps.is_available())'`:
+
+```sh
+uv run train --device mps
+```
 
 ## Development commands
 

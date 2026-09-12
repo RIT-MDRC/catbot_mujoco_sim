@@ -110,7 +110,6 @@ def _(cam, mujoco, render_frame, world):
     data = mujoco.MjData(model)
     mujoco.mj_forward(model, data)
     render_frame(model, data, cam)
-    return
 
 
 @app.cell(hide_code=True)
@@ -130,7 +129,7 @@ def _(mo, world):
             return viewer_process.pid
 
         viewer_xml_path.write_text(world, encoding="utf-8")
-        viewer_state["process"] = subprocess.Popen(
+        viewer_state["process"] = subprocess.Popen(  # pyright: ignore[reportArgumentType]
             [sys.executable, "-m", "mujoco.viewer", f"--mjcf={viewer_xml_path}"]
         )
         return viewer_state["process"].pid
@@ -145,7 +144,6 @@ def _(mo, world):
             open_viewer_button,
         ]
     )
-    return
 
 
 if __name__ == "__main__":

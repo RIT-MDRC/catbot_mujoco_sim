@@ -8,3 +8,7 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Reinforcement-learning checkpoints and TensorBoard event files
+runs/
+runs-*/
