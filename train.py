@@ -1,4 +1,4 @@
-"""Train a PPO policy for Catbot. Run with: uv run --extra train python train.py."""
+"""Legacy Stable-Baselines3 trainer. Run with: uv run train-sb3."""
 
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ def main() -> None:
         from stable_baselines3.common.env_util import make_vec_env
     except ImportError as error:
         raise SystemExit(
-            "Install training dependencies first: uv sync --extra train"
+            "Install dependencies first: uv sync --locked"
         ) from error
     if args.device == "mps" and not torch.backends.mps.is_available():
         raise SystemExit("MPS is unavailable in this Python/PyTorch/macOS environment.")

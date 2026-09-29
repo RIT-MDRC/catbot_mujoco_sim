@@ -2,6 +2,51 @@
 
 An interactive MuJoCo workspace for building and previewing a small quadruped robot. The robot and its scene are authored as Jinja2 XML templates, then rendered in a reactive [Marimo](https://marimo.io) notebook.
 
+## mjlab CPU rollout on macOS
+
+For GPU PPO training on RIT Research Computing, use the new RSL-RL trainer:
+see [RIT cluster training instructions](TRAINING_RIT.md). `uv run train` and
+`uv run mjlab-train` run that trainer; `uv run train-sb3` retains the old trainer.
+
+The checkpoint-free rollout uses **mjlab 1.6.0 / MuJoCo Warp** on the CPU,
+with one simulation world. It reuses the existing Jinja MJCF templates unchanged:
+the ball-jointed hips, all 16 actuator slots, locked hip-z targets, contacts,
+and 0.002-second physics timestep are retained. The existing Gymnasium
+environment, legacy PPO scripts, notebook, and manual viewer remain available.
+
+```sh
+uv sync --locked
+uv run mjlab-rollout
+# Move the front-left knee sinusoidally for 2 seconds of simulation:
+uv run mjlab-rollout --motion sine --steps 1000
+```
+
+The default runs 500 physics steps (one simulated second) holding the initial
+joint targets, then prints a JSON summary with device, elapsed simulation time,
+base position, and finite-state status. These open-loop targets do not balance
+the robot or produce a learned gait. CPU execution may be slower than real time;
+the first run also compiles and caches Warp kernels.
+
+To watch it in the native viewer on this Mac:
+
+```sh
+uv run mjlab-rollout --viewer --motion sine --steps 1000
+```
+
+The command automatically relaunches through `mjpython` on macOS and supplies
+uv Python's shared-library directory to the launcher. The viewer closes when
+the requested steps finish; closing it early stops the
+rollout. Physics is advanced only by `mjlab.sim.Simulation.step()`; the native
+MuJoCo data is a display copy. Viewer actuator sliders are not rollout inputs.
+No checkpoint, CUDA device, or training run is needed. See mjlab's
+[platform support notes](https://mujocolab.github.io/mjlab/v1.6.0/source/faq.html).
+
+Run the real CPU integration check and existing environment tests with:
+
+```sh
+uv run python -m unittest discover -s tests
+```
+
 ## Requirements
 
 - [uv](https://docs.astral.sh/uv/) for Python and dependency management
@@ -91,7 +136,10 @@ uv run tensorboard --logdir runs
 
 `robot.xml.j2` defines a free-floating torso, four ball-jointed hips, hinge knees, capsule limbs, and spherical feet. `world.xml.j2` supplies the top light and the `<worldbody>` where the robot is placed.
 
-## Reinforcement learning
+## Legacy Stable-Baselines3 training
+
+This section describes the old CPU trainer and its `.zip` checkpoints. For the
+new GPU trainer and `.pt` checkpoints, follow [TRAINING_RIT.md](TRAINING_RIT.md).
 
 `catbot_env.py` exposes the rendered model as `CatbotEnv`, a standard Gymnasium environment. It has 16 normalized position-action slots for checkpoint compatibility: hip x/y and knee targets are active, while every hip-z target is fixed at zero because that movement is unavailable on the real robot. Its 66-value observation contains base pose and velocity, joint pose and velocity, the current `(forward, lateral, yaw)` velocity command, and the prior action.
 
@@ -107,7 +155,7 @@ Install dependencies and train a first policy:
 
 ```sh
 uv sync
-uv run train --timesteps 1000000
+uv run train-sb3 --timesteps 1000000
 ```
 
 The final model is written to `runs/catbot_ppo.zip`; periodic checkpoints are written to `runs/checkpoints/` every 25,000 timesteps. The `runs/` directory is intentionally Git-ignored but remains visible in Finder and the terminal. The training environment is headless; use `CatbotEnv(render_mode="rgb_array")` for evaluation frames or `render_mode="human"` from a desktop session for an interactive MuJoCo viewer.
@@ -115,7 +163,7 @@ The final model is written to `runs/catbot_ppo.zip`; periodic checkpoints are wr
 Change the checkpoint interval, or disable intermediate saves with `--checkpoint-freq 0`:
 
 ```sh
-uv run train --checkpoint-freq 50000
+uv run train-sb3 --checkpoint-freq 50000
 ```
 
 Open the native MuJoCo viewer and play one episode from the default checkpoint:
@@ -164,13 +212,13 @@ Use `axis x` or `axis y` to test the available hip actuators. Hip-z is locked at
 To continue a finished or interrupted run, pass its checkpoint and the number of *additional* timesteps to collect. The default output path overwrites that checkpoint only after the extra training is complete.
 
 ```sh
-uv run train --resume runs/catbot_ppo.zip --timesteps 1000000
+uv run train-sb3 --resume runs/catbot_ppo.zip --timesteps 1000000
 ```
 
 PPO defaults to CPU because MuJoCo physics and this small MLP policy are CPU-heavy. On Apple Silicon, opt into Metal Performance Shaders after confirming availability with `uv run python -c 'import torch; print(torch.backends.mps.is_available())'`:
 
 ```sh
-uv run train --device mps
+uv run train-sb3 --device mps
 ```
 
 ## Development commands
