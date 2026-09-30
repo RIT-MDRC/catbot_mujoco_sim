@@ -40,8 +40,14 @@ class CatbotMjlabEnv(VecEnv):
         self.generator = torch.Generator(device=device).manual_seed(seed)
         wp.init()
         if device.startswith("cuda"):
-            # Keep policy tensor writes and Warp graph launches on the same stream.
-            wp.set_stream(wp.stream_from_torch(torch.cuda.current_stream(device)))
+            # Graph capture cannot use PyTorch's default CUDA stream. Keep a
+            # Warp-owned stream alive and share it with all subsequent policy
+            # tensor writes and simulation launches on this thread.
+            self._warp_stream = wp.Stream(device)
+            self._torch_stream = wp.stream_to_torch(self._warp_stream)
+            self._torch_stream.wait_stream(torch.cuda.current_stream(device))
+            wp.set_stream(self._warp_stream)
+            torch.cuda.set_stream(self._torch_stream)
         model = mujoco.MjModel.from_xml_string(CatbotEnv._render_mjcf())
         self.sim = Simulation(num_envs, SimulationCfg(), model=model, device=device)
         self.num_actions = model.nu
