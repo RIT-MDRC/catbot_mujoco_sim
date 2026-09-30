@@ -293,6 +293,18 @@ automatic online-to-offline fallback or guaranteed upload on Slurm termination.
 
 ### Download a checkpoint on your Mac
 
+To download a selected checkpoint and immediately open local playback, run:
+
+```sh
+uv run wandb login
+uv run python play_wandb.py ENTITY/PROJECT/RUN_ID model_999.pt
+```
+
+Replace the run path and checkpoint filename with your selection. Repeat the
+command with another filename to compare checkpoints. The script refreshes the
+checkpoint, `config.json`, and `model.xml` under `runs/mjlab/wandb/ENTITY/PROJECT/RUN_ID/`
+on each invocation. Add `--steps 3000` for 60 simulated seconds of playback.
+
 Download `model_N.pt`, `config.json`, and `model.xml` from the run's Files tab
 into the same new directory under `runs/mjlab/`. Alternatively, authenticate
 with `uv run wandb login` and use the API (replace the run ID and filename):
@@ -343,6 +355,15 @@ including action smoothing and automatic resets after falls. Each policy step
 is 0.02 simulated seconds; omit `--viewer` for a headless check. Without a
 checkpoint, `mjlab-rollout` still tests the model without a learned policy.
 
+Checkpoint playback with `--viewer` (including `play_wandb.py`) starts with a
+zero velocity command. Focus the viewer window and press W/S to increase/decrease
+world X velocity by 0.1 m/s, A/D for world Y by 0.05 m/s, and Q/E for yaw rate by
+0.1 rad/s (positive/negative). Space zeros all three commands; this requests a
+stop from the policy, rather than pausing physics. Commands persist after key
+release and episode resets. The terminal prints each change. Commands are
+limited to the training ranges: X [-0.3, 0.8], Y [-0.1, 0.1] m/s and yaw
+[-0.8, 0.8] rad/s. Headless playback retains random commands.
+
 For a small local training smoke test without a GPU:
 
 ```sh
@@ -360,10 +381,31 @@ CPU mode exists for validation, not the intended large training workload.
   five epochs, four minibatches, adaptive learning rate starting at 0.001,
   clipping 0.2, discount 0.99, GAE lambda 0.95. These are starting settings,
   not tuned hyperparameters.
-- The robot/scene MJCF is unchanged. All 16 action slots remain, including locked
-  hip-z; actions are clipped, smoothed with the original 0.8 coefficient and
-  mapped to actuator ranges. Observations retain the original 66-value layout.
-- Reward weights and 20-degree tilt/0.14 m fall thresholds follow `CatbotEnv`.
+- The robot/scene MJCF is unchanged. All 16 action slots remain, but locked
+  hip-z slots are zeroed and excluded from action penalties. Actions are clipped,
+  smoothed with coefficient 0.8, and mapped to actuator ranges. The 94-value
+  observation includes the original 66 values plus the last action difference,
+  four capped air timers, four contact flags, and four established-stance flags.
+  Start a fresh training run: old 66-input policies are incompatible.
+- Swing clearance measures the bottom of each spherical foot above the ground,
+  targeting 0.06 m. The squared fractional shortfall is capped at one, averaged
+  over airborne feet, and weighted by 0.2: zero clearance costs 0.2, half-height
+  costs 0.05, and target height costs zero. Stance feet are excluded.
+- Action acceleration is the squared second difference of smoothed normalized
+  actions, averaged over active joints with weight 0.5. It is a discrete control
+  smoothness penalty at the fixed 50 Hz control rate, not physical acceleration.
+- Touchdown reward averages across four feet with weight 0.2. Air time at or below
+  0.12 s earns zero; reward rises linearly to a cap at 0.35 s. It requires commanded
+  planar speed or absolute yaw rate above 0.1 (m/s or rad/s), and prior stance in
+  the current episode. Initial landings and brief contact flicker earn nothing.
+  Swing timers count absent-contact samples and clear on touchdown. Stance-slip
+  penalties exclude touchdown displacement. Histories reset per environment.
+- These starting values are recorded in each run's environment config; learned
+  gait quality still needs evaluation. Weighted diagnostics are
+  `foot_clearance_penalty`, `action_acceleration_penalty`, and `air_time_reward`.
+  Legacy SB3 rewards are unchanged.
+- Termination retains the 20-degree tilt/0.14 m fall thresholds. Failed transitions
+  return -1 instead of locomotion rewards; timeouts retain their normal reward.
   Foot contacts and rewards are batched on-device. Episodes auto-reset per world;
   time limits are distinguished from falls for PPO bootstrapping.
 - This initial training environment uses fixed masses/friction and reference

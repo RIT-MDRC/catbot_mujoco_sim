@@ -1,15 +1,38 @@
 """Exercise real mjlab CPU physics with the existing Catbot model."""
 
 import unittest
+from types import SimpleNamespace
 
 import mujoco
 import numpy as np
+import torch
 
 from catbot_env import CatbotEnv
-from mjlab_rollout import make_simulation, sync_viewer_data
+from mjlab_rollout import KeyboardCommand, make_simulation, sync_viewer_data
 
 
 class MjlabRolloutTests(unittest.TestCase):
+    def test_keyboard_commands_and_reset_override(self):
+        control = KeyboardCommand()
+        env = SimpleNamespace(command=torch.ones(1, 3))
+        control.apply(env)
+        torch.testing.assert_close(env.command, torch.zeros(1, 3))
+        for key in "WAQ":
+            control.on_key(ord(key))
+        control.apply(env)
+        torch.testing.assert_close(env.command, torch.tensor([[0.1, 0.05, 0.1]]))
+        env.command.fill_(-0.7)  # An episode reset samples a random command.
+        control.apply(env)
+        torch.testing.assert_close(env.command, torch.tensor([[0.1, 0.05, 0.1]]))
+        for _ in range(30):
+            for key in "WDE":
+                control.on_key(ord(key))
+        control.apply(env)
+        torch.testing.assert_close(env.command, torch.tensor([[0.8, -0.1, -0.8]]))
+        control.on_key(ord(" "))
+        control.apply(env)
+        torch.testing.assert_close(env.command, torch.zeros(1, 3))
+
     def test_model_state_and_reset(self):
         simulation = make_simulation()
         original = mujoco.MjModel.from_xml_string(CatbotEnv._render_mjcf())

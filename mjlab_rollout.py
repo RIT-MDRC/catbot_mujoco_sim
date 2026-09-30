@@ -10,6 +10,7 @@ import sysconfig
 import time
 from contextlib import nullcontext
 from pathlib import Path
+from queue import Empty, SimpleQueue
 
 import mujoco
 import numpy as np
@@ -17,6 +18,52 @@ import torch
 from mjlab.sim import Simulation, SimulationCfg
 
 from catbot_env import CatbotEnv
+
+
+class KeyboardCommand:
+    """Queue viewer events; update commands only on the simulation thread."""
+
+    def __init__(self):
+        self.events = SimpleQueue()
+        self.command = torch.zeros(3)
+
+    def on_key(self, keycode):
+        self.events.put(keycode)
+
+    def apply(self, environment):
+        changed = False
+        keys = {
+            ord("W"): (0, 0.1),
+            ord("S"): (0, -0.1),
+            ord("A"): (1, 0.05),
+            ord("D"): (1, -0.05),
+            ord("Q"): (2, 0.1),
+            ord("E"): (2, -0.1),
+        }
+        while True:
+            try:
+                key = self.events.get_nowait()
+            except Empty:
+                break
+            if key == ord(" "):
+                self.command.zero_()
+                changed = True
+            elif key in keys:
+                axis, delta = keys[key]
+                self.command[axis] += delta
+                changed = True
+        self.command.clamp_(
+            min=torch.tensor([-0.3, -0.1, -0.8]),
+            max=torch.tensor([0.8, 0.1, 0.8]),
+        )
+        # Reapply before observations, including after an automatic reset.
+        environment.command[:] = self.command
+        if changed:
+            x, y, yaw = self.command.tolist()
+            print(
+                f"Command: X={x:+.2f} m/s, Y={y:+.2f} m/s, yaw={yaw:+.2f} rad/s",
+                flush=True,
+            )
 
 
 def make_simulation() -> Simulation:
@@ -114,10 +161,19 @@ def run_policy(checkpoint: Path, steps: int, *, viewer: bool = False) -> dict:
     policy = runner.get_inference_policy(device="cpu")
     simulation = environment.sim
     sync_viewer_data(simulation)
+    keyboard = KeyboardCommand() if viewer else None
     if viewer:
         from mujoco.viewer import launch_passive
 
-        context = launch_passive(simulation.mj_model, simulation.mj_data)
+        print(
+            "Keyboard commands (focus viewer): W/S = +/- X, A/D = +/- Y, "
+            "Q/E = +/- yaw, Space = zero command. Starts at zero; "
+            "commands persist until changed. X/Y are world axes.",
+            flush=True,
+        )
+        context = launch_passive(
+            simulation.mj_model, simulation.mj_data, key_callback=keyboard.on_key
+        )
     else:
         context = nullcontext(None)
     completed = episodes = 0
@@ -127,6 +183,8 @@ def run_policy(checkpoint: Path, steps: int, *, viewer: bool = False) -> dict:
             if window is not None and not window.is_running():
                 break
             tick = time.monotonic()
+            if keyboard is not None:
+                keyboard.apply(environment)
             action = policy(environment.get_observations())
             if not torch.isfinite(action).all():
                 raise RuntimeError("Policy produced non-finite actions")
