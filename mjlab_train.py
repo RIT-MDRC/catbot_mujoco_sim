@@ -19,10 +19,27 @@ from catbot_env import CatbotEnv
 from mjlab_env import CatbotMjlabEnv
 
 
-def runner_config(steps=24, save_interval=50):
+def runner_config(
+    steps=24,
+    save_interval=50,
+    *,
+    logger="wandb",
+    wandb_project="catbot",
+    wandb_entity=None,
+):
     config = asdict(RslRlOnPolicyRunnerCfg())
     config.update(
-        num_steps_per_env=steps, save_interval=save_interval, logger="tensorboard"
+        num_steps_per_env=steps,
+        save_interval=save_interval,
+        logger=(
+            {
+                "class_name": "training_wandb:CatbotWandbWriter",
+                "project": wandb_project,
+                "entity": wandb_entity,
+            }
+            if logger == "wandb"
+            else "tensorboard"
+        ),
     )
     config["actor"]["hidden_dims"] = [256, 128, 64]
     config["critic"]["hidden_dims"] = [256, 128, 64]
@@ -48,6 +65,13 @@ def main():
     parser.add_argument("--steps-per-env", type=int, default=24)
     parser.add_argument("--save-interval", type=int, default=50)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--logger", choices=("tensorboard", "wandb"), default="wandb"
+    )
+    parser.add_argument("--wandb-project", default="catbot")
+    parser.add_argument(
+        "--wandb-entity", help="W&B user or team; defaults to W&B account settings."
+    )
     parser.add_argument(
         "--log-dir", type=Path, help="New run directory; must not already exist."
     )
@@ -76,7 +100,13 @@ def main():
     )
     log_dir.mkdir(parents=True, exist_ok=False)
     environment = CatbotMjlabEnv(args.num_envs, args.device, args.seed)
-    config = runner_config(args.steps_per_env, args.save_interval)
+    config = runner_config(
+        args.steps_per_env,
+        args.save_interval,
+        logger=args.logger,
+        wandb_project=args.wandb_project,
+        wandb_entity=args.wandb_entity,
+    )
     config["seed"] = args.seed
     config["max_iterations"] = args.iterations
     (log_dir / "config.json").write_text(
@@ -95,7 +125,12 @@ def main():
         # RSL-RL stores the last completed zero-based iteration.
         runner.current_learning_iteration += 1
     print(f"Run directory: {log_dir.resolve()}", flush=True)
-    runner.learn(num_learning_iterations=args.iterations)
+    try:
+        runner.learn(num_learning_iterations=args.iterations)
+    except BaseException:
+        if args.logger == "wandb" and runner.logger.writer is not None:
+            runner.logger.writer.stop(exit_code=1)
+        raise
 
 
 if __name__ == "__main__":

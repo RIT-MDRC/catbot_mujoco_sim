@@ -110,6 +110,12 @@ For training log, you can use tensor board:
 uv run tensorboard --logdir runs
 ```
 
+Training uses W&B by default for cloud dashboards and checkpoint uploads.
+Use `--logger tensorboard` for local-only logging.
+See [the W&B cluster setup](TRAINING_RIT.md#6-wb-dashboards-and-cloud-checkpoints)
+for login, Slurm settings, offline sync, and downloading checkpoints. W&B mode
+also keeps local TensorBoard logs.
+
 ## Workspace layout
 
 ```text

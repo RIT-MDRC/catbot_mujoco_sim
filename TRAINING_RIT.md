@@ -55,7 +55,7 @@ environment and local checkpoints and does not delete remote files:
 
 ```sh
 rsync -av --exclude='.venv' --exclude='.git' --exclude='__pycache__' \
-  --exclude='.ruff_cache' --exclude='.DS_Store' --exclude='runs*' \
+  --exclude='.ruff_cache' --exclude='.DS_Store' --exclude='runs*' --exclude='wandb' \
   ./ YOUR_RIT_USERNAME@sporcsubmit.rc.rit.edu:/shared/rc/YOUR_PROJECT/catbot_mujoco/
 ```
 
@@ -112,6 +112,10 @@ The first Warp run also builds a kernel cache and can take longer than later run
 See [mjlab installation](https://mujocolab.github.io/mjlab/v1.6.0/source/installation.html).
 
 ## 4. Submit a short GPU smoke test
+
+W&B is the default logger. Complete the login setup in section 6 before
+submitting, or set `export WANDB_MODE=offline` to sync later. For local-only
+TensorBoard logging, set `export TRAIN_LOGGER=tensorboard` instead.
 
 From the repository root on the cluster:
 
@@ -188,7 +192,113 @@ optimizer and iteration count are restored; simulation and RNG states restart,
 so this is not bit-for-bit continuation. Use the same model/configuration and
 trusted checkpoints from this trainer. SB3 `.zip` files cannot be resumed here.
 
-## 6. Inspect results on your Mac
+## 6. W&B dashboards and cloud checkpoints
+
+The trainer and Slurm script use W&B by default. Select `--logger tensorboard`
+for local-only logging, or set `TRAIN_LOGGER=tensorboard` for Slurm jobs.
+W&B mode writes the same local checkpoints and TensorBoard events, logs metrics
+to a browser dashboard, and uploads each completed checkpoint plus `config.json`
+and `model.xml` to the run's **Files** tab. These are run files, not versioned
+W&B Artifacts. All checkpoints are retained locally and remotely; monitor your
+W&B storage quota and choose `SAVE_INTERVAL` accordingly. Uploads are asynchronous:
+a saved local checkpoint does not prove its cloud upload completed.
+
+Local validation covered a two-iteration CPU run with the actual W&B SDK in
+offline mode, both checkpoint files and metadata staged for sync, and local
+TensorBoard events. Authenticated cloud uploads and RIT GPU jobs remain unverified.
+
+After transferring the updated project, on the cluster's login/submit node:
+
+```sh
+cd "$CATBOT_DIR"
+uv sync --locked
+uv run wandb login
+export WANDB_ENTITY=YOUR_WANDB_USER_OR_TEAM
+export WANDB_PROJECT=catbot
+export WANDB_MODE=online
+export TRAIN_LOGGER=wandb
+```
+
+Create/select your W&B account or team and a private project in the W&B website.
+Paste the API key at the interactive login prompt; do not put it in this repo,
+the batch script, or an `sbatch --export` argument. Login credentials normally
+live in your home directory and must be accessible from the compute node.
+`WANDB_ENTITY` is the W&B user/team slug, not your RIT username. No TensorBoard
+server or inbound port is needed for the W&B dashboard.
+
+First submit a short job with W&B enabled:
+
+```sh
+sbatch --account="$CATBOT_ACCOUNT" --partition=debug --time=00:15:00 \
+  --export=ALL,NUM_ENVS=4,ITERATIONS=2,SAVE_INTERVAL=1 scripts/train_mjlab.sbatch
+```
+
+`--export=ALL` carries these settings into the job. Use an authorized GPU partition
+if `debug` is unavailable. Verify the printed W&B run URL, metric charts, and
+`config.json`, `model.xml`, `model_0.pt`, and `model_1.pt` in Files before relying
+on cloud storage. Then submit the normal training command from section 5.
+Each submission, including `RESUME`, creates a new W&B run named `slurm-JOB_ID`;
+model state resumes, but the old W&B run is not reopened. Leave `WANDB_RUN_ID`
+and `WANDB_RESUME` unset. To use TensorBoard-only, `export TRAIN_LOGGER=tensorboard`.
+
+For a direct invocation (including a local CPU smoke test):
+
+```sh
+WANDB_MODE=offline uv run mjlab-train --device cpu --num-envs 2 \
+  --steps-per-env 4 --iterations 2 --save-interval 1 \
+  --logger wandb --wandb-project catbot
+```
+
+### Compute nodes without outbound internet
+
+RIT compute-node connectivity to W&B has not been verified. If online
+initialization fails, set `export WANDB_MODE=offline` before submitting a new
+job. Offline logging requires no login on the compute node. It preserves metrics
+and file-upload records under `runs/mjlab/slurm-JOB_ID/wandb/offline-run-*`, but
+does not update the cloud dashboard while training.
+
+After the job ends, sync from a network-connected login node:
+
+```sh
+uv run wandb login
+uv run wandb sync runs/mjlab/slurm-JOB_ID/wandb/offline-run-*
+```
+
+Keep the whole run directory, including the original checkpoint files, until
+sync finishes and you verify the files online: W&B's staging directory uses
+symlinks to saved files. If syncing from your Mac instead, transfer the whole
+run with `rsync -avL` to dereference those links. Interrupted jobs may leave
+pending uploads; keep local data and inspect W&B/Slurm logs. There is no
+automatic online-to-offline fallback or guaranteed upload on Slurm termination.
+
+### Download a checkpoint on your Mac
+
+Download `model_N.pt`, `config.json`, and `model.xml` from the run's Files tab
+into the same new directory under `runs/mjlab/`. Alternatively, authenticate
+with `uv run wandb login` and use the API (replace the run ID and filename):
+
+```sh
+uv run python - <<'PY'
+from pathlib import Path
+import wandb
+
+destination = Path("runs/mjlab/downloaded-run")
+destination.mkdir(parents=True, exist_ok=False)
+run = wandb.Api().run("YOUR_ENTITY/catbot/YOUR_WANDB_RUN_ID")
+for name in ("model_975.pt", "config.json", "model.xml"):
+    run.file(name).download(root=str(destination), replace=False)
+PY
+uv run mjlab-rollout runs/mjlab/downloaded-run/model_975.pt --viewer --steps 1500
+```
+
+To resume on RIT, download the files there and set `RESUME` to the downloaded
+checkpoint as in section 5. Only load trusted checkpoints.
+
+References: [W&B file uploads](https://docs.wandb.ai/ref/python/experiments/run/),
+[W&B CLI](https://docs.wandb.ai/ref/cli/),
+[W&B file downloads](https://docs.wandb.ai/models/ref/python/public-api/file).
+
+## 7. Inspect results on your Mac with TensorBoard
 
 Copy a completed run back (substitute the run ID and remote path):
 
@@ -202,13 +312,21 @@ uv run tensorboard --logdir runs/mjlab --host 127.0.0.1
 Open the localhost URL printed by TensorBoard. Compare episode returns/lengths,
 tracking, uprightness, foot drag, failures and PPO losses. Better returns alone
 do not establish a useful gait. The old `uv run rollout` reads SB3 checkpoints,
-not these RSL-RL `.pt` files; the checkpoint-free `mjlab-rollout` still tests the
-model without a learned policy.
+not these RSL-RL `.pt` files. Play a trusted RSL-RL checkpoint on the CPU with:
+
+```sh
+uv run mjlab-rollout runs/mjlab/YOUR_RUN/model_1.pt --viewer --steps 1500
+```
+
+Keep `config.json` beside the checkpoint. Playback uses the training environment,
+including action smoothing and automatic resets after falls. Each policy step
+is 0.02 simulated seconds; omit `--viewer` for a headless check. Without a
+checkpoint, `mjlab-rollout` still tests the model without a learned policy.
 
 For a small local training smoke test without a GPU:
 
 ```sh
-uv run mjlab-train --device cpu --num-envs 2 --steps-per-env 4 \
+uv run mjlab-train --logger tensorboard --device cpu --num-envs 2 --steps-per-env 4 \
   --iterations 2 --save-interval 1
 uv run python -m unittest discover -s tests
 ```
@@ -233,6 +351,7 @@ CPU mode exists for validation, not the intended large training workload.
   Legacy mass/friction/joint-pose randomization has not been migrated. This is
   a simulation training baseline, not a hardware-ready policy.
 - Only single-GPU execution is wired up. No multi-node/DDP training, curriculum,
-  automatic hyperparameter search, or external experiment-service login is needed.
+  or automatic hyperparameter search is implemented. W&B is optional;
+  TensorBoard-only and offline runs do not require an external-service login.
 
 Reference: [RIT Slurm quick reference](https://research-computing.git-pages.rit.edu/docs/slurm_reference.html).

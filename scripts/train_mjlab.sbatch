@@ -33,7 +33,11 @@ run_dir="runs/mjlab/slurm-${SLURM_JOB_ID}"
 # The trainer refuses to overwrite an existing run directory.
 args=(--device cuda:0 --num-envs "${NUM_ENVS:-256}"
       --iterations "${ITERATIONS:-1000}" --save-interval "${SAVE_INTERVAL:-25}"
-      --log-dir "$run_dir")
+      --log-dir "$run_dir" --logger "${TRAIN_LOGGER:-wandb}"
+      --wandb-project "${WANDB_PROJECT:-catbot}")
+if [[ -n "${WANDB_ENTITY:-}" ]]; then
+    args+=(--wandb-entity "$WANDB_ENTITY")
+fi
 if [[ -n "${RESUME:-}" ]]; then
     args+=(--resume "$RESUME")
 fi

@@ -85,7 +85,7 @@ class TrainingTests(unittest.TestCase):
             original.close()
 
     def test_ppo_update_checkpoint_and_resume(self):
-        config = runner_config(steps=4, save_interval=1)
+        config = runner_config(steps=4, save_interval=1, logger="tensorboard")
         with tempfile.TemporaryDirectory() as directory:
             runner = OnPolicyRunner(self.env, deepcopy(config), directory, device="cpu")
             before = [

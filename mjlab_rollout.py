@@ -1,4 +1,4 @@
-"""Checkpoint-free Catbot rollout using mjlab's MuJoCo Warp CPU simulator."""
+"""Catbot CPU rollout with optional RSL-RL checkpoint playback."""
 
 from __future__ import annotations
 
@@ -95,10 +95,72 @@ def run(steps: int, *, viewer: bool = False, motion: str = "hold") -> dict:
     }
 
 
+def run_policy(checkpoint: Path, steps: int, *, viewer: bool = False) -> dict:
+    """Play a trusted training checkpoint using the training environment."""
+    from rsl_rl.runners import OnPolicyRunner
+
+    from mjlab_env import CatbotMjlabEnv
+
+    config = json.loads(checkpoint.with_name("config.json").read_text())
+    torch.set_num_threads(1)
+    environment = CatbotMjlabEnv(
+        1,
+        "cpu",
+        seed=config["environment"]["seed"],
+        max_episode_length=config["environment"]["max_episode_length"],
+    )
+    runner = OnPolicyRunner(environment, config["runner"], device="cpu")
+    runner.load(str(checkpoint), map_location="cpu")
+    policy = runner.get_inference_policy(device="cpu")
+    simulation = environment.sim
+    sync_viewer_data(simulation)
+    if viewer:
+        from mujoco.viewer import launch_passive
+
+        context = launch_passive(simulation.mj_model, simulation.mj_data)
+    else:
+        context = nullcontext(None)
+    completed = episodes = 0
+    total_reward = 0.0
+    with torch.inference_mode(), context as window:
+        for _ in range(steps):
+            if window is not None and not window.is_running():
+                break
+            tick = time.monotonic()
+            action = policy(environment.get_observations())
+            if not torch.isfinite(action).all():
+                raise RuntimeError("Policy produced non-finite actions")
+            _, reward, done, _ = environment.step(action)
+            completed += 1
+            episodes += int(done[0])
+            total_reward += float(reward[0])
+            if window is not None:
+                with window.lock():
+                    sync_viewer_data(simulation)
+                window.sync()
+                time.sleep(max(0, environment.dt - (time.monotonic() - tick)))
+    return {
+        "checkpoint": str(checkpoint),
+        "device": "cpu",
+        "control_steps": completed,
+        "episodes_completed": episodes,
+        "total_reward": total_reward,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--steps", type=int, default=500, help="Physics steps (0.002 seconds each)."
+        "checkpoint",
+        nargs="?",
+        type=Path,
+        help="Trusted model_*.pt checkpoint with adjacent config.json.",
+    )
+    parser.add_argument(
+        "--steps",
+        type=int,
+        default=500,
+        help="Physics steps, or policy control steps (0.02 seconds) with a checkpoint.",
     )
     parser.add_argument(
         "--viewer",
@@ -109,6 +171,14 @@ def main() -> None:
     args = parser.parse_args()
     if args.steps <= 0:
         parser.error("--steps must be positive")
+    if args.checkpoint:
+        if (
+            not args.checkpoint.is_file()
+            or not args.checkpoint.with_name("config.json").is_file()
+        ):
+            parser.error("Checkpoint and adjacent config.json must exist")
+        if args.motion != "hold":
+            parser.error("--motion sine cannot be combined with a checkpoint")
     if args.viewer and sys.platform == "darwin" and "MJPYTHON_BIN" not in os.environ:
         # uv Python uses @rpath/libpython; mjpython changes the executable path.
         # Supply the interpreter's library directory to dyld before relaunching.
@@ -128,7 +198,11 @@ def main() -> None:
             ],
             env,
         )
-    print(json.dumps(run(args.steps, viewer=args.viewer, motion=args.motion), indent=2))
+    if args.checkpoint:
+        result = run_policy(args.checkpoint, args.steps, viewer=args.viewer)
+    else:
+        result = run(args.steps, viewer=args.viewer, motion=args.motion)
+    print(json.dumps(result, indent=2))
 
 
 if __name__ == "__main__":
