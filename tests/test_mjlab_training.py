@@ -12,8 +12,46 @@ import torch
 from rsl_rl.runners import OnPolicyRunner
 
 from catbot_env import CatbotEnv
-from mjlab_env import CatbotMjlabEnv
+from mjlab_env import DEFAULT_CONFIG, CatbotMjlabEnv, load_catbot_config
 from mjlab_train import runner_config
+
+
+class ConfigTests(unittest.TestCase):
+    def test_yaml_custom_values_and_mapping_copy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "custom.yaml"
+            path.write_text(
+                DEFAULT_CONFIG.read_text().replace(
+                    "tracking_weight: 1.0", "tracking_weight: 2.5"
+                )
+            )
+            config = load_catbot_config(path)
+            self.assertEqual(config["tracking_weight"], 2.5)
+            copied = load_catbot_config(config)
+            copied["tracking_weight"] = 0
+            self.assertEqual(config["tracking_weight"], 2.5)
+
+    def test_invalid_config_rejected(self):
+        for key, value in (
+            ("frame_skip", 0),
+            ("command_interval", 0),
+            ("tracking_weight", -1),
+            ("air_time_limit", 0.1),
+            ("bound_speed", 0.1),
+            ("action_smoothing", 1),
+            ("gait_transition_seconds", 0),
+            ("foot_clearance_target", 0),
+        ):
+            with self.subTest(key=key):
+                config = load_catbot_config()
+                config[key] = value
+                with self.assertRaises(ValueError):
+                    load_catbot_config(config)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bad.yaml"
+            path.write_text("tracking_weight: 1\n")
+            with self.assertRaises(ValueError):
+                load_catbot_config(path)
 
 
 class TrainingTests(unittest.TestCase):
@@ -21,9 +59,20 @@ class TrainingTests(unittest.TestCase):
         torch.set_num_threads(1)
         self.env = CatbotMjlabEnv(2, "cpu", seed=7)
 
+    def test_saved_config_used_with_runtime_overrides(self):
+        config = load_catbot_config()
+        config["tracking_weight"] = 2.5
+        config["frame_skip"] = 5
+        env = CatbotMjlabEnv(1, "cpu", seed=9, config=config)
+        self.assertEqual(env.cfg["tracking_weight"], 2.5)
+        self.assertEqual(env.frame_skip, 5)
+        self.assertEqual(env.cfg["num_envs"], 1)
+        self.assertEqual(env.cfg["device"], "cpu")
+        self.assertEqual(config["device"], "cuda:0")
+
     def test_observations_actions_and_partial_reset(self):
         env = self.env
-        self.assertEqual(env.get_observations()["actor"].shape, (2, 94))
+        self.assertEqual(env.get_observations()["actor"].shape, (2, 97))
         _, reward, done, _ = env.step(torch.ones(2, 16))
         self.assertTrue(torch.isfinite(reward).all())
         self.assertFalse(done.any())
@@ -90,9 +139,9 @@ class TrainingTests(unittest.TestCase):
         action = torch.zeros(2, 16)
         _, reward = env.gait_terms(action, contact)
         torch.testing.assert_close(reward, torch.tensor([0.0, 1.0]))
-        env.feet_air_time[1] = 10  # No unbounded reward for hopping/hovering.
+        env.feet_air_time[1] = 10  # Holding a foot up forfeits touchdown credit.
         _, reward = env.gait_terms(action, contact)
-        torch.testing.assert_close(reward, torch.tensor([0.0, 1.0]))
+        torch.testing.assert_close(reward, torch.zeros(2))
         _, reward = env.gait_terms(action, ~contact)
         self.assertTrue((reward == 0).all())
         env.feet_air_time.zero_()
@@ -116,17 +165,20 @@ class TrainingTests(unittest.TestCase):
     def test_step_counts_air_samples_and_clears_swing_on_touchdown(self):
         env = self.env
         env.previous_contact.fill_(True)
-        contact = torch.zeros(2, 4, dtype=torch.bool)
+        contact = torch.ones(2, 4, dtype=torch.bool)
+        contact[:, :2] = False
         with patch.object(env, "foot_contacts", return_value=contact):
             env.step(torch.ones(2, 16))
-            torch.testing.assert_close(env.feet_air_time, torch.full((2, 4), env.dt))
+            torch.testing.assert_close(
+                env.feet_air_time[:, :2], torch.full((2, 2), env.dt)
+            )
             torch.testing.assert_close(
                 env.previous_action_delta[:, env.active_actions],
                 torch.full((2, 12), 0.2),
             )
             env.step(torch.ones(2, 16))
             torch.testing.assert_close(
-                env.feet_air_time, torch.full((2, 4), 2 * env.dt)
+                env.feet_air_time[:, :2], torch.full((2, 2), 2 * env.dt)
             )
             torch.testing.assert_close(
                 env.previous_action_delta[:, env.active_actions],
@@ -159,10 +211,12 @@ class TrainingTests(unittest.TestCase):
         env.command[:] = torch.tensor([0.4, 0.0, 0.0])
         env.has_stance.fill_(True)
         env.previous_contact.fill_(True)
-        contact = torch.zeros(2, 4, dtype=torch.bool)
+        contact = torch.ones(2, 4, dtype=torch.bool)
+        contact[:, :2] = False
         # Hold physics still to isolate the actual step/history/reward ordering.
-        with patch.object(env.sim, "step"), patch.object(
-            env, "foot_contacts", return_value=contact
+        with (
+            patch.object(env.sim, "step"),
+            patch.object(env, "foot_contacts", return_value=contact),
         ):
             for _ in range(10):
                 _, _, _, extras = env.step(torch.zeros(2, 16))
@@ -171,7 +225,7 @@ class TrainingTests(unittest.TestCase):
             _, _, _, extras = env.step(torch.zeros(2, 16))
             self.assertAlmostEqual(
                 float(extras["log"]["/air_time_reward"]),
-                0.2 * (0.20 - 0.12) / (0.35 - 0.12),
+                0.1 * (0.20 - 0.12) / (0.35 - 0.12),
                 places=6,
             )
             _, _, _, extras = env.step(torch.zeros(2, 16))
@@ -203,6 +257,158 @@ class TrainingTests(unittest.TestCase):
         self.assertTrue((acceleration == 0).all())
         env.step(action)
         self.assertTrue((env.previous_action == 0).all())
+
+    def test_held_leg_is_penalized_each_step_without_movement_command(self):
+        env = self.env
+        env.command.zero_()
+        contact = torch.ones(2, 4, dtype=torch.bool)
+        contact[:, 0] = False
+        env.feet_air_time[:, 0] = 0.70
+        env.sim.data.geom_xpos[:, env.feet, 2] = 0.10
+        with (
+            patch.object(env.sim, "step"),
+            patch.object(env, "foot_contacts", return_value=contact),
+        ):
+            for _ in range(3):
+                _, _, _, extras = env.step(torch.zeros(2, 16))
+                self.assertAlmostEqual(
+                    float(extras["log"]["/prolonged_swing_penalty"]), 0.5
+                )
+                self.assertAlmostEqual(float(env.feet_air_time[0, 0]), 0.70)
+            contact.fill_(True)
+            _, _, _, extras = env.step(torch.zeros(2, 16))
+            self.assertEqual(float(extras["log"]["/prolonged_swing_penalty"]), 0)
+            self.assertTrue((env.feet_air_time == 0).all())
+
+    def test_normal_swing_has_no_overdue_cost(self):
+        torch.testing.assert_close(
+            self.env.swing_overdue(torch.tensor([0.12, 0.35, 0.525, 0.70])),
+            torch.tensor([0.0, 0.0, 0.5, 1.0]),
+        )
+
+    def test_high_held_leg_cannot_dilute_other_foot_clearance_cost(self):
+        env = self.env
+        contact = torch.ones(2, 4, dtype=torch.bool)
+        contact[:, 0] = False
+        env.sim.data.geom_xpos[:, env.feet, 2] = 0.02
+        action = torch.zeros(2, 16)
+        _, _, first = env.reward_terms(action, contact)
+        contact[:, 1] = False
+        env.sim.data.geom_xpos[:, env.feet[1], 2] = 0.10
+        _, _, second = env.reward_terms(action, contact)
+        self.assertAlmostEqual(float(first["/foot_clearance_penalty"]), 0.05)
+        torch.testing.assert_close(
+            first["/foot_clearance_penalty"], second["/foot_clearance_penalty"]
+        )
+
+    def test_support_penalty_scales_with_missing_feet(self):
+        env = self.env
+        action = torch.zeros(2, 16)
+        for count, expected in ((0, 1.0), (1, 0.5), (2, 0.0), (3, 0.0), (4, 0.0)):
+            contact = torch.zeros(2, 4, dtype=torch.bool)
+            contact[:, :count] = True
+            reward, _, metrics = env.reward_terms(action, contact)
+            self.assertAlmostEqual(float(metrics["/support_deficit_penalty"]), expected)
+            env.cfg["support_deficit_weight"] = 0
+            without_penalty, _, _ = env.reward_terms(action, contact)
+            torch.testing.assert_close(
+                without_penalty - reward, torch.full((2,), expected)
+            )
+            env.cfg["support_deficit_weight"] = 0.5
+
+    def test_zero_support_does_not_terminate_or_override_timeout(self):
+        env = self.env
+        contact = torch.zeros(2, 4, dtype=torch.bool)
+        with (
+            patch.object(env.sim, "step"),
+            patch.object(env, "foot_contacts", return_value=contact),
+        ):
+            _, reward, done, extras = env.step(torch.zeros(2, 16))
+            self.assertFalse(done.any())
+            self.assertTrue(torch.isfinite(reward).all())
+            self.assertEqual(float(extras["log"]["/support_deficit_penalty"]), 1)
+            env.max_episode_length = 2
+            _, _, done, extras = env.step(torch.zeros(2, 16))
+            self.assertTrue(done.all())
+            self.assertTrue(extras["time_outs"].all())
+
+    def test_trot_and_bound_pairing_in_both_directions(self):
+        env = self.env
+        for speed, expected in (
+            (0.2, [1, 0, 0, 1]),
+            (0.8, [1, 1, 0, 0]),
+            (-0.8, [1, 1, 0, 0]),
+        ):
+            env.command[:] = torch.tensor([speed, 0, 0])
+            env.gait_blend.copy_(env.target_gait_blend())
+            env.gait_phase.zero_()
+            target = env.gait_contact_target()
+            self.assertEqual((target[0] > 0.5).int().tolist(), expected)
+            env.gait_phase.fill_(0.5)
+            self.assertEqual(
+                (env.gait_contact_target()[0] > 0.5).int().tolist(),
+                [1 - x for x in expected],
+            )
+
+    def test_gait_transition_is_rate_limited_and_keeps_support(self):
+        env = self.env
+        env.command[:] = torch.tensor([0.8, 0, 0])
+        env.gait_blend.zero_()
+        env.advance_gait()
+        torch.testing.assert_close(env.gait_blend, torch.full((2,), 0.04))
+        for blend in torch.linspace(0, 1, 11):
+            env.gait_blend.fill_(float(blend))
+            for phase in torch.linspace(0, 1, 41):
+                env.gait_phase.fill_(float(phase))
+                self.assertTrue(
+                    ((env.gait_contact_target() > 0.5).sum(dim=1) >= 2).all()
+                )
+
+    def test_standing_target_and_gait_reset(self):
+        env = self.env
+        env.command.zero_()
+        before = env.gait_phase.clone()
+        env.advance_gait()
+        torch.testing.assert_close(env.gait_phase, before)
+        torch.testing.assert_close(env.gait_contact_target(), torch.ones(2, 4))
+        before_phase = env.gait_phase[1].clone()
+        before_blend = env.gait_blend[1].clone()
+        env.reset(torch.tensor([0]))
+        torch.testing.assert_close(env.gait_phase[1], before_phase)
+        torch.testing.assert_close(env.gait_blend[1], before_blend)
+        self.assertTrue(0 <= env.gait_phase[0] < 1)
+        self.assertAlmostEqual(
+            float(env.gait_blend[0]), float(env.target_gait_blend()[0])
+        )
+
+    def test_phase_reward_prefers_correct_pair(self):
+        env = self.env
+        env.command[:] = torch.tensor([0.2, 0, 0])
+        env.gait_phase.zero_()
+        env.gait_blend.zero_()
+        contact = torch.tensor([[True, False, False, True]]).expand(2, -1)
+        _, _, correct = env.reward_terms(torch.zeros(2, 16), contact)
+        _, _, wrong = env.reward_terms(torch.zeros(2, 16), ~contact)
+        self.assertGreater(
+            float(correct["/gait_contact_reward"]),
+            float(wrong["/gait_contact_reward"]) + 0.7,
+        )
+
+    def test_command_resampling_preserves_phase_continuity(self):
+        env = self.env
+        env.cfg["command_interval"] = 1
+        env.command[:] = torch.tensor([0.2, 0, 0])
+        env.gait_blend.zero_()
+        env.gait_phase.fill_(0.1)
+        with patch.object(env.sim, "step"):
+            observations, _, done, _ = env.step(torch.zeros(2, 16))
+        self.assertFalse(done.any())
+        torch.testing.assert_close(env.gait_phase, torch.full((2,), 0.13))
+        self.assertFalse(
+            torch.equal(env.command, torch.tensor([[0.2, 0, 0]]).expand(2, -1))
+        )
+        self.assertTrue((env.command[:, 0].abs() <= 0.8).all())
+        self.assertEqual(observations["actor"].shape[1], 97)
 
     def test_ppo_update_checkpoint_and_resume(self):
         config = runner_config(steps=4, save_interval=1, logger="tensorboard")

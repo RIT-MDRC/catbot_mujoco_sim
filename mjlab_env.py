@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import math
-from typing import TypedDict
+from pathlib import Path
+from typing import TypedDict, cast, get_type_hints
 
 import mujoco
 import torch
 import warp as wp
+import yaml
 from mjlab.sim import Simulation, SimulationCfg
 from rsl_rl.env import VecEnv
 from tensordict import TensorDict
@@ -23,12 +25,75 @@ class CatbotConfig(TypedDict):
     frame_skip: int
     action_smoothing: float
     domain_randomization: bool
+    tracking_weight: float
+    upright_weight: float
+    height_weight: float
+    control_weight: float
+    action_rate_weight: float
+    foot_drag_weight: float
     foot_clearance_weight: float
     foot_clearance_target: float
     action_acceleration_weight: float
     air_time_weight: float
     air_time_min: float
     air_time_max: float
+    air_time_limit: float
+    min_support_feet: int
+    support_deficit_weight: float
+    gait_contact_weight: float
+    trot_speed: float
+    bound_speed: float
+    gait_transition_seconds: float
+    command_interval: int
+    prolonged_swing_weight: float
+
+
+DEFAULT_CONFIG = Path(__file__).resolve().parent / "assets" / "catbot_config.yaml"
+
+
+def load_catbot_config(source=None) -> CatbotConfig:
+    """Read YAML defaults, a custom YAML file, or a saved run's resolved config."""
+    if isinstance(source, dict):
+        config = dict(source)
+    else:
+        path = DEFAULT_CONFIG if source is None else Path(source)
+        config = yaml.safe_load(path.read_text())
+    schema = get_type_hints(CatbotConfig)
+    if not isinstance(config, dict) or config.keys() != schema.keys():
+        raise ValueError("Catbot config must contain exactly the CatbotConfig settings")
+    for key, expected in schema.items():
+        value = config[key]
+        valid = type(value) is expected
+        if expected is float:
+            valid = type(value) in (int, float) and math.isfinite(value)
+        if not valid:
+            raise ValueError(f"Invalid {key}: expected {expected.__name__}")
+    for key in ("num_envs", "max_episode_length", "frame_skip", "command_interval"):
+        if config[key] <= 0:
+            raise ValueError(f"{key} must be positive")
+    for key, value in config.items():
+        if key.endswith("_weight") and value < 0:
+            raise ValueError(f"{key} must be nonnegative")
+    if not 0 <= config["action_smoothing"] < 1:
+        raise ValueError("action_smoothing must be in [0, 1)")
+    if (
+        not 0
+        <= config["air_time_min"]
+        < config["air_time_max"]
+        < config["air_time_limit"]
+    ):
+        raise ValueError("Require 0 <= air_time_min < air_time_max < air_time_limit")
+    if not 0 <= config["trot_speed"] < config["bound_speed"]:
+        raise ValueError("Require 0 <= trot_speed < bound_speed")
+    if config["foot_clearance_target"] <= 0 or config["gait_transition_seconds"] <= 0:
+        raise ValueError(
+            "Clearance target and gait transition duration must be positive"
+        )
+    if not 0 <= config["min_support_feet"] <= 4:
+        raise ValueError("min_support_feet must be between zero and four")
+    if config["domain_randomization"]:
+        raise ValueError("Domain randomization is not implemented for mjlab")
+    return cast(CatbotConfig, config)
 
 
 class CatbotMjlabEnv(VecEnv):
@@ -39,27 +104,35 @@ class CatbotMjlabEnv(VecEnv):
     All worlds, policy inputs and rewards stay on the selected device.
     """
 
-    def __init__(self, num_envs=256, device="cuda:0", seed=0, max_episode_length=1000):
+    cfg: CatbotConfig
+
+    def __init__(
+        self,
+        num_envs=None,
+        device=None,
+        seed=None,
+        max_episode_length=None,
+        *,
+        config=None,
+    ):
+        self.cfg = load_catbot_config(config)
+        for key, value in {
+            "num_envs": num_envs,
+            "device": device,
+            "seed": seed,
+            "max_episode_length": max_episode_length,
+        }.items():
+            if value is not None:
+                self.cfg[key] = value
+        num_envs = self.cfg["num_envs"]
+        device = self.cfg["device"]
+        seed = self.cfg["seed"]
+        max_episode_length = self.cfg["max_episode_length"]
         if num_envs < 1 or max_episode_length < 1:
             raise ValueError("num_envs and max_episode_length must be positive")
         self.num_envs = num_envs
         self.device = device
         self.max_episode_length = max_episode_length
-        self.cfg: CatbotConfig = {
-            "num_envs": num_envs,
-            "device": device,
-            "seed": seed,
-            "max_episode_length": max_episode_length,
-            "frame_skip": 10,
-            "action_smoothing": 0.8,
-            "domain_randomization": False,
-            "foot_clearance_weight": 0.2,
-            "foot_clearance_target": 0.06,
-            "action_acceleration_weight": 0.5,
-            "air_time_weight": 0.2,
-            "air_time_min": 0.12,
-            "air_time_max": 0.35,
-        }
         self.generator = torch.Generator(device=device).manual_seed(seed)
         wp.init()
         if device.startswith("cuda"):
@@ -97,6 +170,8 @@ class CatbotMjlabEnv(VecEnv):
             num_envs, 4, dtype=torch.bool, device=device
         )
         self.has_stance = torch.zeros_like(self.previous_contact)
+        self.gait_phase = torch.zeros(num_envs, device=device)
+        self.gait_blend = torch.zeros(num_envs, device=device)
         self.command = torch.zeros(num_envs, 3, device=device)
         self.episode_length_buf = torch.zeros(num_envs, dtype=torch.long, device=device)
         self.previous_feet = torch.zeros(num_envs, 4, 3, device=device)
@@ -111,9 +186,9 @@ class CatbotMjlabEnv(VecEnv):
         self.sim.data.qvel[ids] = self._uniform(
             (count, self.sim.mj_model.nv), -0.02, 0.02
         )
-        low = torch.tensor([-0.3, -0.1, -0.8], device=self.device)
-        span = torch.tensor([1.1, 0.2, 1.6], device=self.device)
-        self.command[ids] = low + self._uniform((count, 3), 0, 1) * span
+        self.sample_commands(ids)
+        self.gait_phase[ids] = self._uniform((count,), 0, 1)
+        self.gait_blend[ids] = self.target_gait_blend()[ids]
         self.previous_action[ids] = 0
         self.previous_action_delta[ids] = 0
         self.feet_air_time[ids] = 0
@@ -129,6 +204,47 @@ class CatbotMjlabEnv(VecEnv):
             shape, device=self.device, generator=self.generator
         )
 
+    def sample_commands(self, ids):
+        low = torch.tensor([-0.8, -0.1, -0.8], device=self.device)
+        span = torch.tensor([1.6, 0.2, 1.6], device=self.device)
+        self.command[ids] = low + self._uniform((ids.numel(), 3), 0, 1) * span
+
+    def moving_command(self):
+        return (self.command[:, :2].norm(dim=1) > 0.1) | (
+            self.command[:, 2].abs() > 0.1
+        )
+
+    def target_gait_blend(self):
+        return (
+            (self.command[:, 0].abs() - self.cfg["trot_speed"])
+            / (self.cfg["bound_speed"] - self.cfg["trot_speed"])
+        ).clamp(0, 1)
+
+    def advance_gait(self):
+        limit = self.dt / self.cfg["gait_transition_seconds"]
+        self.gait_blend.add_(
+            (self.target_gait_blend() - self.gait_blend).clamp(-limit, limit)
+        )
+        # 1.5 Hz trot -> 2 Hz bound; freeze the clock while standing.
+        self.gait_phase.add_(
+            self.dt * (1.5 + 0.5 * self.gait_blend) * self.moving_command()
+        ).remainder_(1)
+
+    def gait_contact_target(self):
+        # FL, FR, RL, RR. Keep FL/RL and FR/RR half a cycle apart throughout
+        # the transition, avoiding an intermediate all-feet-swing target.
+        b = self.gait_blend
+        offsets = torch.stack(
+            (torch.zeros_like(b), 0.5 * (1 - b), torch.full_like(b, 0.5), 1 - 0.5 * b),
+            dim=1,
+        )
+        angle = 2 * math.pi * (self.gait_phase[:, None] + offsets)
+        # 60% stance with soft boundaries and overlap between supporting pairs.
+        target = torch.sigmoid(12 * (torch.cos(angle) - math.cos(math.pi * 0.6)))
+        return torch.where(
+            self.moving_command()[:, None], target, torch.ones_like(target)
+        )
+
     def get_observations(self):
         data = self.sim.data
         obs = torch.cat(
@@ -140,9 +256,12 @@ class CatbotMjlabEnv(VecEnv):
                 self.command,
                 self.previous_action,
                 self.previous_action_delta,
-                self.feet_air_time / self.cfg["air_time_max"],
+                self.feet_air_time / self.cfg["air_time_limit"],
                 self.previous_contact.float(),
                 self.has_stance.float(),
+                torch.sin(2 * math.pi * self.gait_phase)[:, None],
+                torch.cos(2 * math.pi * self.gait_phase)[:, None],
+                self.gait_blend[:, None],
             ),
             dim=1,
         )
@@ -178,11 +297,17 @@ class CatbotMjlabEnv(VecEnv):
             (self.feet_air_time - self.cfg["air_time_min"])
             / (self.cfg["air_time_max"] - self.cfg["air_time_min"])
         ).clamp(0, 1)
-        moving = (self.command[:, :2].norm(dim=1) > 0.1) | (
-            self.command[:, 2].abs() > 0.1
-        )
+        duration *= 1 - self.swing_overdue(self.feet_air_time)
+        moving = self.moving_command()
         air_time = (duration * touchdown).mean(dim=1) * moving
         return acceleration, air_time
+
+    def swing_overdue(self, air_time):
+        """Fraction of the allowed overrun, per foot, bounded for stability."""
+        return (
+            (air_time - self.cfg["air_time_max"])
+            / (self.cfg["air_time_limit"] - self.cfg["air_time_max"])
+        ).clamp(0, 1)
 
     def reward_terms(self, action, contact=None):
         data = self.sim.data
@@ -193,38 +318,48 @@ class CatbotMjlabEnv(VecEnv):
         )
         upright = up.clamp(min=0)
         height = torch.exp(-40 * (data.qpos[:, 2] - 0.32).square())
-        control = 0.015 * action[:, self.active_actions].square().mean(dim=1)
-        rate = 0.1 * (action - self.previous_action)[
-            :, self.active_actions
-        ].square().mean(dim=1)
+        control = action[:, self.active_actions].square().mean(dim=1)
+        rate = (
+            (action - self.previous_action)[:, self.active_actions].square().mean(dim=1)
+        )
         feet = data.geom_xpos[:, self.feet]
         velocity = (feet - self.previous_feet) / self.dt
         if contact is None:
             contact = self.foot_contacts()
         acceleration, air_time = self.gait_terms(action, contact)
+        gait_match = 1 - (contact.float() - self.gait_contact_target()).abs().mean(
+            dim=1
+        )
+        support_deficit = (self.cfg["min_support_feet"] - contact.sum(dim=1)).clamp(
+            min=0
+        )
         # Exclude touchdown displacement from the stance-slip estimate.
         stance = contact & self.previous_contact
         drag = (velocity[:, :, :2].square().sum(dim=2) * stance).sum(
             dim=1
         ) / stance.sum(dim=1).clamp(min=1)
         swing = ~contact
+        prolonged_swing = (
+            self.swing_overdue(self.feet_air_time + self.dt) * swing
+        ).sum(dim=1)
         # Spherical feet over the scene's horizontal ground plane. Normalize
         # the deficit so the coefficient has a meaningful reward-scale value.
         foot_height = (
             feet[:, :, 2] - self.foot_radius - data.geom_xpos[:, self.ground, 2:3]
         )
         deficit = (1 - foot_height / self.cfg["foot_clearance_target"]).clamp(0, 1)
-        clearance = (deficit.square() * swing).sum(dim=1) / swing.sum(dim=1).clamp(
-            min=1
-        )
+        clearance = (deficit.square() * swing).mean(dim=1)
         reward = (
             0.2
-            + tracking
-            + 0.5 * upright
-            + 0.3 * height
-            - control
-            - rate
-            - 0.05 * drag
+            + self.cfg["gait_contact_weight"] * gait_match
+            + self.cfg["tracking_weight"] * tracking
+            + self.cfg["upright_weight"] * upright
+            + self.cfg["height_weight"] * height
+            - self.cfg["control_weight"] * control
+            - self.cfg["action_rate_weight"] * rate
+            - self.cfg["foot_drag_weight"] * drag
+            - self.cfg["support_deficit_weight"] * support_deficit
+            - self.cfg["prolonged_swing_weight"] * prolonged_swing
             - self.cfg["foot_clearance_weight"] * clearance
             - self.cfg["action_acceleration_weight"] * acceleration
             + self.cfg["air_time_weight"] * air_time
@@ -234,6 +369,11 @@ class CatbotMjlabEnv(VecEnv):
             up,
             {
                 "/reward": reward.mean(),
+                "/gait_contact_reward": self.cfg["gait_contact_weight"]
+                * gait_match.mean(),
+                "/bound_blend": self.gait_blend.mean(),
+                "/support_deficit_penalty": self.cfg["support_deficit_weight"]
+                * support_deficit.float().mean(),
                 "/tracking": tracking.mean(),
                 "/upright": upright.mean(),
                 "/foot_drag": drag.mean(),
@@ -244,6 +384,8 @@ class CatbotMjlabEnv(VecEnv):
                 "/action_acceleration_penalty": (
                     self.cfg["action_acceleration_weight"] * acceleration.mean()
                 ),
+                "/prolonged_swing_penalty": self.cfg["prolonged_swing_weight"]
+                * prolonged_swing.mean(),
                 "/air_time_reward": self.cfg["air_time_weight"] * air_time.mean(),
             },
         )
@@ -261,6 +403,7 @@ class CatbotMjlabEnv(VecEnv):
             self.sim.step()
         self.sim.forward()
         self.episode_length_buf += 1
+        self.advance_gait()
         contact = self.foot_contacts()
         reward, up, metrics = self.reward_terms(action, contact)
         finite = torch.isfinite(self.sim.data.qpos).all(dim=1) & torch.isfinite(
@@ -278,11 +421,13 @@ class CatbotMjlabEnv(VecEnv):
         metrics["/reward"] = reward.mean()
         self.previous_action_delta.copy_(action - self.previous_action)
         self.previous_action.copy_(action)
-        self.feet_air_time.add_(self.dt).clamp_(max=self.cfg["air_time_max"])
+        self.feet_air_time.add_(self.dt).clamp_(max=self.cfg["air_time_limit"])
         self.feet_air_time.masked_fill_(contact, 0)
         self.has_stance |= contact
         self.previous_contact.copy_(contact)
         self.previous_feet.copy_(self.sim.data.geom_xpos[:, self.feet])
+        resample = (self.episode_length_buf % self.cfg["command_interval"] == 0) & ~done
+        self.sample_commands(resample.nonzero(as_tuple=False).flatten())
         self.reset(done.nonzero(as_tuple=False).flatten())
         metrics = {key: torch.nan_to_num(value) for key, value in metrics.items()}
         metrics["/failures"] = failed.float().mean()

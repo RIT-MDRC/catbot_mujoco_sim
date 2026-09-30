@@ -29,6 +29,10 @@ class MjlabRolloutTests(unittest.TestCase):
                 control.on_key(ord(key))
         control.apply(env)
         torch.testing.assert_close(env.command, torch.tensor([[0.8, -0.1, -0.8]]))
+        for _ in range(30):
+            control.on_key(ord("S"))
+        control.apply(env)
+        self.assertAlmostEqual(float(env.command[0, 0]), -0.8)
         control.on_key(ord(" "))
         control.apply(env)
         torch.testing.assert_close(env.command, torch.zeros(1, 3))

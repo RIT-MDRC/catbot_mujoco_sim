@@ -16,7 +16,7 @@ from mjlab.rl.config import RslRlOnPolicyRunnerCfg
 from rsl_rl.runners import OnPolicyRunner
 
 from catbot_env import CatbotEnv
-from mjlab_env import CatbotMjlabEnv
+from mjlab_env import CatbotMjlabEnv, load_catbot_config
 
 
 def runner_config(
@@ -54,8 +54,13 @@ def runner_config(
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--device", choices=("cpu", "cuda:0"), default="cuda:0")
-    parser.add_argument("--num-envs", type=int, default=256)
+    parser.add_argument(
+        "--config",
+        type=Path,
+        help="Environment YAML (default: assets/catbot_config.yaml).",
+    )
+    parser.add_argument("--device", choices=("cpu", "cuda:0"), default=None)
+    parser.add_argument("--num-envs", type=int, default=None)
     parser.add_argument(
         "--iterations",
         type=int,
@@ -64,10 +69,8 @@ def main():
     )
     parser.add_argument("--steps-per-env", type=int, default=24)
     parser.add_argument("--save-interval", type=int, default=50)
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument(
-        "--logger", choices=("tensorboard", "wandb"), default="wandb"
-    )
+    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--logger", choices=("tensorboard", "wandb"), default="wandb")
     parser.add_argument("--wandb-project", default="catbot")
     parser.add_argument(
         "--wandb-entity", help="W&B user or team; defaults to W&B account settings."
@@ -79,6 +82,13 @@ def main():
         "--resume", type=Path, help="Trusted RSL-RL model_*.pt checkpoint."
     )
     args = parser.parse_args()
+    try:
+        environment_config = load_catbot_config(args.config)
+    except (OSError, ValueError) as error:
+        parser.error(str(error))
+    for key in ("num_envs", "device", "seed"):
+        if getattr(args, key) is None:
+            setattr(args, key, environment_config[key])
     for key in ("num_envs", "iterations", "steps_per_env", "save_interval"):
         if getattr(args, key) <= 0:
             parser.error(f"--{key.replace('_', '-')} must be positive")
@@ -99,7 +109,9 @@ def main():
         "%Y%m%d-%H%M%S-%f"
     )
     log_dir.mkdir(parents=True, exist_ok=False)
-    environment = CatbotMjlabEnv(args.num_envs, args.device, args.seed)
+    environment = CatbotMjlabEnv(
+        args.num_envs, args.device, args.seed, config=environment_config
+    )
     config = runner_config(
         args.steps_per_env,
         args.save_interval,

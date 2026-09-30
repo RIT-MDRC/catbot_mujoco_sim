@@ -13,3 +13,9 @@ wheels/
 runs/
 runs-*/
 wandb/
+
+# Rollout examples
+videos/
+
+# MACOS
+.DS_Store

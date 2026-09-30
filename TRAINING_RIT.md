@@ -361,7 +361,7 @@ world X velocity by 0.1 m/s, A/D for world Y by 0.05 m/s, and Q/E for yaw rate b
 0.1 rad/s (positive/negative). Space zeros all three commands; this requests a
 stop from the policy, rather than pausing physics. Commands persist after key
 release and episode resets. The terminal prints each change. Commands are
-limited to the training ranges: X [-0.3, 0.8], Y [-0.1, 0.1] m/s and yaw
+limited to the training ranges: X [-0.8, 0.8], Y [-0.1, 0.1] m/s and yaw
 [-0.8, 0.8] rad/s. Headless playback retains random commands.
 
 For a small local training smoke test without a GPU:
@@ -374,6 +374,23 @@ uv run python -m unittest discover -s tests
 
 CPU mode exists for validation, not the intended large training workload.
 
+## Environment configuration
+
+Edit `assets/catbot_config.yaml` to tune environment defaults, reward weights,
+contact timing, and gait transition thresholds. Training reads this file relative
+to the installed module, independent of the working directory. To use another
+complete configuration:
+
+```sh
+uv run mjlab-train --config path/to/catbot_config.yaml --device cpu --num-envs 2
+```
+
+Explicit `--device`, `--num-envs`, and `--seed` arguments override YAML values.
+The resolved environment settings are saved in each run's `config.json` and used
+by checkpoint playback. Resumed training uses the selected YAML and CLI settings,
+so retain the original configuration when an exact continuation is desired.
+`CatbotConfig` remains the Python type schema; default values live only in YAML.
+
 ## Training design and current limits
 
 - Actor and critic: separate 256/128/64 ELU MLPs with observation normalization;
@@ -383,33 +400,65 @@ CPU mode exists for validation, not the intended large training workload.
   not tuned hyperparameters.
 - The robot/scene MJCF is unchanged. All 16 action slots remain, but locked
   hip-z slots are zeroed and excluded from action penalties. Actions are clipped,
-  smoothed with coefficient 0.8, and mapped to actuator ranges. The 94-value
+  smoothed with coefficient 0.8, and mapped to actuator ranges. The 97-value
   observation includes the original 66 values plus the last action difference,
-  four capped air timers, four contact flags, and four established-stance flags.
-  Start a fresh training run: old 66-input policies are incompatible.
+  four capped air timers, four contact flags, four established-stance flags,
+  sine/cosine of gait phase, and the trot-to-bound blend. Start a fresh training
+  run: old 66- and 94-input policies are incompatible.
+- A phase contact reward (weight 0.8) encourages diagonal trot pairs FL/RR and
+  FR/RL for absolute X command <= 0.35 m/s. At >= 0.60 m/s it encourages front
+  FL/FR and rear RL/RR pairs (a bound). Between these speeds, phase offsets blend;
+  changes in blend are rate-limited over 0.5 s. Defaults are `trot_speed`,
+  `bound_speed`, and `gait_transition_seconds` in `assets/catbot_config.yaml`.
+  Cadence increases from 1.5 to 2 Hz with the blend. A 60% stance fraction and
+  smooth contact targets allow support overlap; this is a supported pairing
+  target, not a flight-phase gallop. The soft support and prolonged-swing costs
+  remain active. Stand commands target all feet down and freeze the phase.
+- Forward/backward X commands now span [-0.8, 0.8] m/s in training and keyboard
+  playback. Gait selection uses absolute commanded X speed, so both directions
+  use the same pairing thresholds. X/Y retain the existing world-axis convention.
+  Training resamples commands every 250 policy steps (5 s) to expose the policy
+  to gait changes within episodes. Playback keyboard commands override sampling.
+  Phase advances continuously and is randomized per reset. `gait_contact_reward`
+  and `bound_blend` provide diagnostics. These are initial tuning values; actual
+  locomotion and transitions require training and visual evaluation.
 - Swing clearance measures the bottom of each spherical foot above the ground,
   targeting 0.06 m. The squared fractional shortfall is capped at one, averaged
-  over airborne feet, and weighted by 0.2: zero clearance costs 0.2, half-height
-  costs 0.05, and target height costs zero. Stance feet are excluded.
+  over all four feet with stance contributions zeroed, and weighted by 0.2.
+  Each airborne foot costs 0.05 at zero clearance, 0.0125 at half-height, and
+  zero at target height. Raising another foot cannot dilute this penalty.
 - Action acceleration is the squared second difference of smoothed normalized
   actions, averaged over active joints with weight 0.5. It is a discrete control
   smoothness penalty at the fixed 50 Hz control rate, not physical acceleration.
 - Touchdown reward averages across four feet with weight 0.2. Air time at or below
-  0.12 s earns zero; reward rises linearly to a cap at 0.35 s. It requires commanded
+  0.12 s earns zero; reward rises linearly to its peak at 0.35 s, then falls
+  linearly to zero at 0.70 s. It requires commanded
   planar speed or absolute yaw rate above 0.1 (m/s or rad/s), and prior stance in
   the current episode. Initial landings and brief contact flicker earn nothing.
   Swing timers count absent-contact samples and clear on touchdown. Stance-slip
   penalties exclude touchdown displacement. Histories reset per environment.
+- Every airborne foot incurs a continuous prolonged-swing penalty after 0.35 s,
+  rising linearly to 0.5 per control step at 0.70 s and remaining there until
+  touchdown. Costs sum across feet and apply even at zero commanded speed.
+  Air timers cap at 0.70 s and observations normalize them by that limit.
+  This discourages permanently raised legs without prescribing a gait sequence.
 - These starting values are recorded in each run's environment config; learned
   gait quality still needs evaluation. Weighted diagnostics are
-  `foot_clearance_penalty`, `action_acceleration_penalty`, and `air_time_reward`.
+  `foot_clearance_penalty`, `action_acceleration_penalty`, `air_time_reward`,
+  and `prolonged_swing_penalty`.
   Legacy SB3 rewards are unchanged.
+- Ground support is a soft reward term: each missing foot below two contacts
+  costs 0.5 per policy step (zero contacts: 1.0; one: 0.5; two or more: zero).
+  `support_deficit_penalty` logs the weighted cost. Low support alone does not
+  terminate an episode. Contacts are evaluated at the normal 50 Hz policy rate;
+  brief losses entirely between policy updates are not separately measured.
 - Termination retains the 20-degree tilt/0.14 m fall thresholds. Failed transitions
   return -1 instead of locomotion rewards; timeouts retain their normal reward.
   Foot contacts and rewards are batched on-device. Episodes auto-reset per world;
   time limits are distinguished from falls for PPO bootstrapping.
 - This initial training environment uses fixed masses/friction and reference
   joint poses on reset. It randomizes base position, velocity and command.
+  The original airborne reset pose is retained.
   Legacy mass/friction/joint-pose randomization has not been migrated. This is
   a simulation training baseline, not a hardware-ready policy.
 - Only single-GPU execution is wired up. No multi-node/DDP training, curriculum,

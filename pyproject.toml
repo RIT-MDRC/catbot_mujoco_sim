@@ -12,6 +12,7 @@ dependencies = [
     "rsl-rl-lib==5.4.2",
     "mujoco>=3.9.0",
     "pillow>=12.2.0",
+    "pyyaml>=6.0.3",
     "ruff>=0.15.16",
     "stable-baselines3>=2.7.0",
     "starlette>=0.51.0",

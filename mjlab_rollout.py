@@ -53,7 +53,7 @@ class KeyboardCommand:
                 self.command[axis] += delta
                 changed = True
         self.command.clamp_(
-            min=torch.tensor([-0.3, -0.1, -0.8]),
+            min=torch.tensor([-0.8, -0.1, -0.8]),
             max=torch.tensor([0.8, 0.1, 0.8]),
         )
         # Reapply before observations, including after an automatic reset.
@@ -155,6 +155,7 @@ def run_policy(checkpoint: Path, steps: int, *, viewer: bool = False) -> dict:
         "cpu",
         seed=config["environment"]["seed"],
         max_episode_length=config["environment"]["max_episode_length"],
+        config=config["environment"],
     )
     runner = OnPolicyRunner(environment, config["runner"], device="cpu")
     runner.load(str(checkpoint), map_location="cpu")
