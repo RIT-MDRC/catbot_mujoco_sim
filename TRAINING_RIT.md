@@ -357,7 +357,7 @@ checkpoint, `mjlab-rollout` still tests the model without a learned policy.
 
 Checkpoint playback with `--viewer` (including `play_wandb.py`) starts with a
 zero velocity command. Focus the viewer window and press W/S to increase/decrease
-world X velocity by 0.1 m/s, A/D for world Y by 0.05 m/s, and Q/E for yaw rate by
+body-heading forward velocity by 0.1 m/s, A/D for body-heading lateral velocity by 0.05 m/s, and Q/E for yaw rate by
 0.1 rad/s (positive/negative). Space zeros all three commands; this requests a
 stop from the policy, rather than pausing physics. Commands persist after key
 release and episode resets. The terminal prints each change. Commands are
@@ -400,11 +400,12 @@ so retain the original configuration when an exact continuation is desired.
   not tuned hyperparameters.
 - The robot/scene MJCF is unchanged. All 16 action slots remain, but locked
   hip-z slots are zeroed and excluded from action penalties. Actions are clipped,
-  smoothed with coefficient 0.8, and mapped to actuator ranges. The 97-value
+  smoothed with coefficient 0.8, and mapped to actuator ranges. The 110-value
   observation includes the original 66 values plus the last action difference,
   four capped air timers, four contact flags, four established-stance flags,
-  sine/cosine of gait phase, and the trot-to-bound blend. Start a fresh training
-  run: old 66- and 94-input policies are incompatible.
+  sine/cosine of gait phase, the trot-to-bound blend, 12 actuator travel totals,
+  and motion-window progress. Start a fresh training
+  run: old 66-, 94-, and 97-input policies are incompatible.
 - A phase contact reward (weight 0.8) encourages diagonal trot pairs FL/RR and
   FR/RL for absolute X command <= 0.35 m/s. At >= 0.60 m/s it encourages front
   FL/FR and rear RL/RR pairs (a bound). Between these speeds, phase offsets blend;
@@ -416,12 +417,52 @@ so retain the original configuration when an exact continuation is desired.
   remain active. Stand commands target all feet down and freeze the phase.
 - Forward/backward X commands now span [-0.8, 0.8] m/s in training and keyboard
   playback. Gait selection uses absolute commanded X speed, so both directions
-  use the same pairing thresholds. X/Y retain the existing world-axis convention.
+  use the same pairing thresholds. X/Y are relative to the body heading on the horizontal plane.
   Training resamples commands every 250 policy steps (5 s) to expose the policy
   to gait changes within episodes. Playback keyboard commands override sampling.
   Phase advances continuously and is randomized per reset. `gait_contact_reward`
   and `bound_blend` provide diagnostics. These are initial tuning values; actual
   locomotion and transitions require training and visual evaluation.
+- Velocity tracking and linear-velocity observations use the body's horizontal
+  heading: positive X is forward, positive Y is left, and negative X is backward,
+  regardless of world orientation. Roll/pitch do not mix vertical velocity into
+  forward tracking. Yaw commands retain body-local angular-Z velocity tracking.
+  Observation semantics changed; train a fresh policy.
+- Explicit tilt cost is `tilt_weight * (1 - torso_up) / (1 - cos(reference))`.
+  Defaults are weight 0.5 and reference 10 degrees: approximately 0.5 cost at
+  10 degrees and 2.0 at 20 degrees. `tilt_rate_weight: 0.05` additionally penalizes
+  squared body roll/pitch angular velocity to discourage wobble, excluding yaw.
+  Diagnostics are `tilt_penalty` and `tilt_rate_penalty`. The upright reward and
+  existing 20-degree fall threshold remain. Values are starting points, not
+  validated gait tuning; strong tilt costs can also limit bounding pitch motion.
+- Comfortable stance is a ground-plane circle beneath each leg's hip/shoulder
+  joint. Its center is the vertical projection of that joint's current world
+  position, so it follows body movement and tilt. `stance_radius: 0.10` gives a
+  10 cm radius in every horizontal direction, including forward/backward.
+  Grounded foot centers inside or on the circle incur no cost; outside, the cost
+  is `stance_boundary_weight * mean(max(distance / radius - 1, 0)^2 * contact)`
+  across all four feet, with default weight 0.5. Swing feet contribute zero.
+  For example, one grounded foot 5 cm beyond the 10 cm radius costs 0.03125.
+  `stance_boundary_penalty` logs this term. It is a soft preference, not a clamp;
+  increase the radius if it restricts stride length. The implementation assumes
+  the scene's horizontal ground plane and spherical feet.
+- Per-actuator motion budgets discourage concentrating travel in one actuator.
+  Each physics step accumulates absolute hip-X, hip-Y, and knee angular velocity
+  times timestep, divided by that actuator's full usable control range. Locked
+  hip-Z axes and base motion are excluded. `motion_budget: 0.5` permits total
+  travel equal to half the usable range per cadence-length window (about 0.5–0.67 s).
+  Out-and-back motion counts both directions. This is a kinematic proxy for
+  actuator use, not a torque, heating, or hardware-stress measurement.
+- Beyond the budget, `motion_budget_weight: 1.0` multiplies the mean over 12 axes
+  of the incremental squared excess. The accumulated cost depends on total
+  travel rather than movement speed or time spent above budget. Adding motion
+  in another actuator never earns a rebate. Windows restart at the first policy
+  boundary reaching one cadence cycle; they also run while standing, and reset
+  with episodes. They are not synchronized to individual feet's stance phases.
+  `hip_travel` and `knee_travel` log average normalized travel accumulated so far
+  in each window; `motion_budget_penalty` logs the weighted cost. A smaller
+  budget or larger weight strengthens the preference. Redistribution is not
+  guaranteed: the policy may instead shorten steps, so inspect tracking and gait.
 - Swing clearance measures the bottom of each spherical foot above the ground,
   targeting 0.06 m. The squared fractional shortfall is capped at one, averaged
   over all four feet with stance contributions zeroed, and weighted by 0.2.

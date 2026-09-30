@@ -169,7 +169,7 @@ def run_policy(checkpoint: Path, steps: int, *, viewer: bool = False) -> dict:
         print(
             "Keyboard commands (focus viewer): W/S = +/- X, A/D = +/- Y, "
             "Q/E = +/- yaw, Space = zero command. Starts at zero; "
-            "commands persist until changed. X/Y are world axes.",
+            "commands persist until changed. X/Y follow the robot heading (forward/left).",
             flush=True,
         )
         context = launch_passive(

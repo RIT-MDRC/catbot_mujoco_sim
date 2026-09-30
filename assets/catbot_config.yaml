@@ -8,10 +8,22 @@ action_smoothing: 0.8
 domain_randomization: false
 tracking_weight: 1.0
 upright_weight: 0.5
+# Tilt costs 0.5 at 10 degrees, approximately 2.0 at 20 degrees.
+tilt_weight: 0.5
+tilt_reference_degrees: 10.0
+# Penalize body roll/pitch angular speed squared; yaw turns are excluded.
+tilt_rate_weight: 0.05
 height_weight: 0.3
+# Allowed absolute angular travel per cadence window, as fraction of usable range.
+motion_budget: 0.5
+motion_budget_weight: 1.0
 control_weight: 0.015
 action_rate_weight: 0.1
 foot_drag_weight: 0.05
+# Grounded foot centers may lie within this radius of the projected hip (meters).
+stance_radius: 0.10
+# Mean over four feet of squared excess distance divided by radius squared.
+stance_boundary_weight: 0.5
 foot_clearance_weight: 0.2
 foot_clearance_target: 0.06
 action_acceleration_weight: 0.5

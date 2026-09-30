@@ -26,10 +26,17 @@ class CatbotConfig(TypedDict):
     action_smoothing: float
     domain_randomization: bool
     tracking_weight: float
+    tilt_weight: float
+    tilt_reference_degrees: float
+    tilt_rate_weight: float
     upright_weight: float
     height_weight: float
+    motion_budget: float
+    motion_budget_weight: float
     control_weight: float
     action_rate_weight: float
+    stance_radius: float
+    stance_boundary_weight: float
     foot_drag_weight: float
     foot_clearance_weight: float
     foot_clearance_target: float
@@ -91,6 +98,12 @@ def load_catbot_config(source=None) -> CatbotConfig:
         )
     if not 0 <= config["min_support_feet"] <= 4:
         raise ValueError("min_support_feet must be between zero and four")
+    if not 0 < config["tilt_reference_degrees"] < 90:
+        raise ValueError("tilt_reference_degrees must be between zero and 90")
+    if config["motion_budget"] <= 0:
+        raise ValueError("motion_budget must be positive")
+    if config["stance_radius"] <= 0:
+        raise ValueError("stance_radius must be positive")
     if config["domain_randomization"]:
         raise ValueError("Domain randomization is not implemented for mjlab")
     return cast(CatbotConfig, config)
@@ -158,11 +171,33 @@ class CatbotMjlabEnv(VecEnv):
             device=device,
         )
         self.feet = [model.geom(f"{leg}_foot").id for leg in ("fl", "fr", "rl", "rr")]
+        # Hip body origins coincide with the ball-joint anchors in this model.
+        self.hips = [model.body(f"{leg}_hip").id for leg in ("fl", "fr", "rl", "rr")]
         self.ground = model.geom("ground").id
         self.foot_radius = torch.tensor(
             model.geom_size[self.feet, 0], dtype=torch.float32, device=device
         )
         self.active_actions = self.half_range > 0
+        # Per-leg hip X, hip Y, knee angular velocities; exclude locked hip Z.
+        motion_dofs, motion_ranges = [], []
+        for leg in ("fl", "fr", "rl", "rr"):
+            hip = model.joint(f"{leg}_hip_ball").id
+            knee = model.joint(f"{leg}_knee").id
+            motion_dofs.extend(
+                [
+                    int(model.jnt_dofadr[hip]),
+                    int(model.jnt_dofadr[hip]) + 1,
+                    int(model.jnt_dofadr[knee]),
+                ]
+            )
+            for name in (f"{leg}_hip_x", f"{leg}_hip_y", f"{leg}_knee_actuator"):
+                limits = model.actuator_ctrlrange[model.actuator(name).id]
+                motion_ranges.append(float(limits[1] - limits[0]))
+        self.motion_dofs = motion_dofs
+        self.motion_ranges = torch.tensor(motion_ranges, device=device)
+        self.motion_travel = torch.zeros(num_envs, 12, device=device)
+        self.motion_progress = torch.zeros(num_envs, device=device)
+        self.motion_cost = torch.zeros(num_envs, device=device)
         self.previous_action = torch.zeros(num_envs, model.nu, device=device)
         self.previous_action_delta = torch.zeros_like(self.previous_action)
         self.feet_air_time = torch.zeros(num_envs, 4, device=device)
@@ -189,6 +224,9 @@ class CatbotMjlabEnv(VecEnv):
         self.sample_commands(ids)
         self.gait_phase[ids] = self._uniform((count,), 0, 1)
         self.gait_blend[ids] = self.target_gait_blend()[ids]
+        self.motion_travel[ids] = 0
+        self.motion_progress[ids] = 0
+        self.motion_cost[ids] = 0
         self.previous_action[ids] = 0
         self.previous_action_delta[ids] = 0
         self.feet_air_time[ids] = 0
@@ -245,12 +283,27 @@ class CatbotMjlabEnv(VecEnv):
             self.moving_command()[:, None], target, torch.ones_like(target)
         )
 
+    def heading_linear_velocity(self):
+        """World linear velocity expressed in the body's horizontal heading frame.
+
+        Roll/pitch do not turn vertical bouncing into commanded forward motion.
+        MuJoCo free-joint angular velocities are already body-local.
+        """
+        w, x, y, z = self.sim.data.qpos[:, 3:7].unbind(dim=1)
+        forward_x = 1 - 2 * (y.square() + z.square())
+        forward_y = 2 * (x * y + w * z)
+        norm = (forward_x.square() + forward_y.square()).sqrt().clamp(min=1e-6)
+        c, s = forward_x / norm, forward_y / norm
+        vx, vy, vz = self.sim.data.qvel[:, :3].unbind(dim=1)
+        return torch.stack((c * vx + s * vy, -s * vx + c * vy, vz), dim=1)
+
     def get_observations(self):
         data = self.sim.data
         obs = torch.cat(
             (
                 data.qpos[:, 2:7],
-                data.qvel[:, :6],
+                self.heading_linear_velocity(),
+                data.qvel[:, 3:6],
                 data.qpos[:, 7:],
                 data.qvel[:, 6:],
                 self.command,
@@ -262,6 +315,8 @@ class CatbotMjlabEnv(VecEnv):
                 torch.sin(2 * math.pi * self.gait_phase)[:, None],
                 torch.cos(2 * math.pi * self.gait_phase)[:, None],
                 self.gait_blend[:, None],
+                self.motion_travel,
+                self.motion_progress[:, None],
             ),
             dim=1,
         )
@@ -313,9 +368,16 @@ class CatbotMjlabEnv(VecEnv):
         data = self.sim.data
         quat = data.qpos[:, 3:7]
         up = 1 - 2 * (quat[:, 1].square() + quat[:, 2].square())
-        tracking = torch.exp(
-            -2 * (data.qvel[:, [0, 1, 5]] - self.command).square().sum(dim=1)
+        commanded_velocity = torch.cat(
+            (self.heading_linear_velocity()[:, :2], data.qvel[:, 5:6]), dim=1
         )
+        tracking = torch.exp(
+            -2 * (commanded_velocity - self.command).square().sum(dim=1)
+        )
+        tilt = (1 - up).clamp(min=0) / (
+            1 - math.cos(math.radians(self.cfg["tilt_reference_degrees"]))
+        )
+        tilt_rate = data.qvel[:, 3:5].square().sum(dim=1)
         upright = up.clamp(min=0)
         height = torch.exp(-40 * (data.qpos[:, 2] - 0.32).square())
         control = action[:, self.active_actions].square().mean(dim=1)
@@ -326,6 +388,13 @@ class CatbotMjlabEnv(VecEnv):
         velocity = (feet - self.previous_feet) / self.dt
         if contact is None:
             contact = self.foot_contacts()
+        # On the horizontal ground plane, projecting the hip vertically leaves
+        # its XY coordinates unchanged. Foot spheres contact below their centers.
+        hip_xy = data.xpos[:, self.hips, :2]
+        stance_distance = (feet[:, :, :2] - hip_xy).norm(dim=2)
+        stance_excess = (stance_distance / self.cfg["stance_radius"] - 1).clamp(min=0)
+        # Fixed denominator: another foot cannot dilute an existing violation.
+        stance_boundary = (stance_excess.square() * contact).mean(dim=1)
         acceleration, air_time = self.gait_terms(action, contact)
         gait_match = 1 - (contact.float() - self.gait_contact_target()).abs().mean(
             dim=1
@@ -354,10 +423,14 @@ class CatbotMjlabEnv(VecEnv):
             + self.cfg["gait_contact_weight"] * gait_match
             + self.cfg["tracking_weight"] * tracking
             + self.cfg["upright_weight"] * upright
+            - self.cfg["tilt_weight"] * tilt
+            - self.cfg["tilt_rate_weight"] * tilt_rate
             + self.cfg["height_weight"] * height
+            - self.cfg["motion_budget_weight"] * self.motion_cost
             - self.cfg["control_weight"] * control
             - self.cfg["action_rate_weight"] * rate
             - self.cfg["foot_drag_weight"] * drag
+            - self.cfg["stance_boundary_weight"] * stance_boundary
             - self.cfg["support_deficit_weight"] * support_deficit
             - self.cfg["prolonged_swing_weight"] * prolonged_swing
             - self.cfg["foot_clearance_weight"] * clearance
@@ -369,6 +442,14 @@ class CatbotMjlabEnv(VecEnv):
             up,
             {
                 "/reward": reward.mean(),
+                "/motion_budget_penalty": self.cfg["motion_budget_weight"]
+                * self.motion_cost.mean(),
+                "/hip_travel": self.motion_travel.reshape(self.num_envs, 4, 3)[
+                    :, :, :2
+                ].mean(),
+                "/knee_travel": self.motion_travel.reshape(self.num_envs, 4, 3)[
+                    :, :, 2
+                ].mean(),
                 "/gait_contact_reward": self.cfg["gait_contact_weight"]
                 * gait_match.mean(),
                 "/bound_blend": self.gait_blend.mean(),
@@ -376,7 +457,11 @@ class CatbotMjlabEnv(VecEnv):
                 * support_deficit.float().mean(),
                 "/tracking": tracking.mean(),
                 "/upright": upright.mean(),
+                "/tilt_penalty": self.cfg["tilt_weight"] * tilt.mean(),
+                "/tilt_rate_penalty": self.cfg["tilt_rate_weight"] * tilt_rate.mean(),
                 "/foot_drag": drag.mean(),
+                "/stance_boundary_penalty": self.cfg["stance_boundary_weight"]
+                * stance_boundary.mean(),
                 "/foot_clearance": clearance.mean(),
                 "/foot_clearance_penalty": (
                     self.cfg["foot_clearance_weight"] * clearance.mean()
@@ -390,6 +475,17 @@ class CatbotMjlabEnv(VecEnv):
             },
         )
 
+    def accumulate_motion(self, travel):
+        """Charge only additional squared budget excess, not time spent above it.
+
+        Travel is absolute joint-axis angular motion / usable actuator range.
+        Adding motion in another joint cannot cancel a joint's excess.
+        """
+        before = (self.motion_travel - self.cfg["motion_budget"]).clamp(min=0).square()
+        self.motion_travel.add_(travel)
+        after = (self.motion_travel - self.cfg["motion_budget"]).clamp(min=0).square()
+        self.motion_cost.add_((after - before).mean(dim=1))
+
     def step(self, actions):
         if actions.shape != self.previous_action.shape:
             raise ValueError(f"Expected actions of shape {self.previous_action.shape}")
@@ -399,8 +495,14 @@ class CatbotMjlabEnv(VecEnv):
         )
         action = action * self.active_actions
         self.sim.data.ctrl[:] = self.center + action * self.half_range
+        self.motion_cost.zero_()
         for _ in range(self.frame_skip):
             self.sim.step()
+            travel = (
+                self.sim.data.qvel[:, self.motion_dofs].abs()
+                * self.sim.mj_model.opt.timestep
+            )
+            self.accumulate_motion(travel / self.motion_ranges)
         self.sim.forward()
         self.episode_length_buf += 1
         self.advance_gait()
@@ -419,6 +521,12 @@ class CatbotMjlabEnv(VecEnv):
         done = failed | timeouts
         reward = torch.where(failed, torch.full_like(reward, -1), reward)
         metrics["/reward"] = reward.mean()
+        # A full cadence-length window, even while standing (the gait clock
+        # itself freezes at rest). Check/reset after charging the final step.
+        self.motion_progress.add_(self.dt * (1.5 + 0.5 * self.gait_blend))
+        completed = self.motion_progress >= 1
+        self.motion_travel[completed] = 0
+        self.motion_progress[completed] = 0
         self.previous_action_delta.copy_(action - self.previous_action)
         self.previous_action.copy_(action)
         self.feet_air_time.add_(self.dt).clamp_(max=self.cfg["air_time_limit"])
