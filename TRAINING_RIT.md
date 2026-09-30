@@ -213,11 +213,26 @@ After transferring the updated project, on the cluster's login/submit node:
 cd "$CATBOT_DIR"
 uv sync --locked
 uv run wandb login
-export WANDB_ENTITY=YOUR_WANDB_USER_OR_TEAM
-export WANDB_PROJECT=catbot
-export WANDB_MODE=online
-export TRAIN_LOGGER=wandb
+
+# First-time setup: create a private config outside the shared checkout.
+mkdir -p "$HOME/.config/catbot"
+chmod 700 "$HOME/.config/catbot"
+install -m 600 scripts/training.env.example "$HOME/.config/catbot/training.env"
+nano "$HOME/.config/catbot/training.env"
 ```
+
+Replace `YOUR_WANDB_USER_OR_TEAM` in the file with your W&B user/team slug.
+The batch script reads `~/.config/catbot/training.env` automatically on every
+job; no repeated exports are needed. The file lives in your cluster home
+directory, outside Git and project transfers. Do not repeat the `install` line
+after customizing it; edit the existing file instead. These four settings are
+not secrets. Keep the API key in W&B's login storage, separate from this file.
+
+The example uses shell defaults so an existing environment variable takes
+precedence over the file. For a one-job override, for example:
+`sbatch --export=ALL,WANDB_MODE=offline ...`. With no config file, the batch
+script still defaults to W&B and project `catbot`, using W&B's account settings
+for the entity. The config is shell code; only source a file you control.
 
 Create/select your W&B account or team and a private project in the W&B website.
 Paste the API key at the interactive login prompt; do not put it in this repo,
@@ -233,7 +248,8 @@ sbatch --account="$CATBOT_ACCOUNT" --partition=debug --time=00:15:00 \
   --export=ALL,NUM_ENVS=4,ITERATIONS=2,SAVE_INTERVAL=1 scripts/train_mjlab.sbatch
 ```
 
-`--export=ALL` carries these settings into the job. Use an authorized GPU partition
+The job reads the saved config; `--export=ALL` also preserves shell overrides.
+Use an authorized GPU partition
 if `debug` is unavailable. Verify the printed W&B run URL, metric charts, and
 `config.json`, `model.xml`, `model_0.pt`, and `model_1.pt` in Files before relying
 on cloud storage. Then submit the normal training command from section 5.
@@ -244,15 +260,19 @@ and `WANDB_RESUME` unset. To use TensorBoard-only, `export TRAIN_LOGGER=tensorbo
 For a direct invocation (including a local CPU smoke test):
 
 ```sh
+# Direct commands do not run the Slurm script, so load the config once:
+source "$HOME/.config/catbot/training.env"
 WANDB_MODE=offline uv run mjlab-train --device cpu --num-envs 2 \
   --steps-per-env 4 --iterations 2 --save-interval 1 \
-  --logger wandb --wandb-project catbot
+  --logger "$TRAIN_LOGGER" --wandb-project "$WANDB_PROJECT" \
+  --wandb-entity "$WANDB_ENTITY"
 ```
 
 ### Compute nodes without outbound internet
 
 RIT compute-node connectivity to W&B has not been verified. If online
-initialization fails, set `export WANDB_MODE=offline` before submitting a new
+initialization fails, change the mode in your saved config to `offline` (and
+unset any old `WANDB_MODE` shell override), or set `export WANDB_MODE=offline` before submitting a new
 job. Offline logging requires no login on the compute node. It preserves metrics
 and file-upload records under `runs/mjlab/slurm-JOB_ID/wandb/offline-run-*`, but
 does not update the cloud dashboard while training.

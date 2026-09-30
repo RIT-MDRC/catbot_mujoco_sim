@@ -12,6 +12,11 @@
 # Submit from the repository root; account and partition are supplied to sbatch.
 set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:?Submit this script with sbatch from the repository root}"
+# User-owned shell configuration, kept outside the shared checkout.
+catbot_config="$HOME/.config/catbot/training.env"
+if [[ -f "$catbot_config" ]]; then
+    source "$catbot_config"
+fi
 test -x .venv/bin/python
 export PYTHONUNBUFFERED=1
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-4}"
